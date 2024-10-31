@@ -5,18 +5,18 @@ import (
 )
 
 // MonomialEval evaluates y = sum x^i * poly[i].
-func MonomialEval(x *big.Float, poly []*big.Float) (y *big.Float) {
+func MonomialEval(x *big.Float, poly []big.Float) (y *big.Float) {
 	n := len(poly) - 1
-	y = new(big.Float).Set(poly[n-1])
+	y = new(big.Float).Set(&poly[n-1])
 	for i := n - 2; i >= 0; i-- {
 		y.Mul(y, x)
-		y.Add(y, poly[i])
+		y.Add(y, &poly[i])
 	}
 	return
 }
 
 // ChebyshevEval evaluates y = sum Ti(x) * poly[i], where T0(x) = 1, T1(x) = (2x-a-b)/(b-a) and T{i+j}(x) = 2TiTj(x)- T|i-j|(x).
-func ChebyshevEval(x *big.Float, poly []*big.Float, inter Interval) (y *big.Float) {
+func ChebyshevEval(x *big.Float, poly []big.Float, inter Interval) (y *big.Float) {
 
 	precision := x.Prec()
 
@@ -36,10 +36,10 @@ func ChebyshevEval(x *big.Float, poly []*big.Float, inter Interval) (y *big.Floa
 	Tprev.SetPrec(precision)
 	Tprev.SetFloat64(1)
 	T.Set(u)
-	y = new(big.Float).Set(poly[0])
+	y = new(big.Float).Set(&poly[0])
 
 	for i := 1; i < len(poly); i++ {
-		y.Add(y, tmp.Mul(T, poly[i]))
+		y.Add(y, tmp.Mul(T, &poly[i]))
 		Tnext.Mul(two, u)
 		Tnext.Mul(Tnext, T)
 		Tnext.Sub(Tnext, Tprev)

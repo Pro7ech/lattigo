@@ -1,9 +1,9 @@
 package examples
 
 import (
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/he/heint"
-	"github.com/tuneinsight/lattigo/v5/ring"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/he/heint"
+	"github.com/Pro7ech/lattigo/ring"
 )
 
 var (
@@ -12,76 +12,84 @@ var (
 	// These parameters expect the user to use the regular tensoring (i.e. Evaluator.Mul) followed
 	// by the rescaling (i.e. Evaluator.Rescale).
 	HEIntParamsN12QP109 = heint.ParametersLiteral{
-		LogN:             12,
-		LogQ:             []int{39, 31},
-		LogP:             []int{39},
-		PlaintextModulus: 0x10001,
+		LogN: 12,
+		LogQ: []int{39, 31},
+		LogP: []int{39},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntParamsN13QP218 is an example parameter set for the `heint` package with logN=13 and logQP=218.
 	// These parameters expect the user to use the regular tensoring (i.e. Evaluator.Mul) followed
 	// by the rescaling (i.e. Evaluator.Rescale).
 	HEIntParamsN13QP218 = heint.ParametersLiteral{
-		LogN:             13,
-		LogQ:             []int{42, 33, 33, 33, 33},
-		LogP:             []int{44},
-		PlaintextModulus: 0x10001,
+		LogN: 13,
+		LogQ: []int{42, 33, 33, 33, 33},
+		LogP: []int{44},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntParamsN14QP438 is an example parameter set for the `heint` package with logN=14 and logQP=438.
 	// These parameters expect the user to use the regular tensoring (i.e. Evaluator.Mul) followed
 	// by the rescaling (i.e. Evaluator.Rescale).
 	HEIntParamsN14QP438 = heint.ParametersLiteral{
-		LogN:             14,
-		LogQ:             []int{44, 34, 34, 34, 34, 34, 34, 34, 34, 34},
-		LogP:             []int{44, 44},
-		PlaintextModulus: 0x10001,
+		LogN: 14,
+		LogQ: []int{44, 34, 34, 34, 34, 34, 34, 34, 34, 34},
+		LogP: []int{44, 44},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntParamsN15QP880 is an example parameter set for the `heint` package with logN=15 and logQP=881.
 	// These parameters expect the user to use the regular tensoring (i.e. Evaluator.Mul) followed
 	// by the rescaling (i.e. Evaluator.Rescale).
 	HEIntParamsN15QP880 = heint.ParametersLiteral{
-		LogN:             15,
-		LogQ:             []int{47, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34},
-		LogP:             []int{47, 47, 47, 47},
-		PlaintextModulus: 0x10001,
+		LogN: 15,
+		LogQ: []int{47, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34},
+		LogP: []int{47, 47, 47, 47},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntScaleInvariantParamsN12QP109 is an example parameter set for the `heint` package logN=12 and logQP=109.
 	// These parameters expect the user to use the scale invariant tensoring (i.e. Evaluator.MulScaleInvariant).
 	HEIntScaleInvariantParamsN12QP109 = heint.ParametersLiteral{
-		LogN:             12,
-		LogQ:             []int{39, 39},
-		LogP:             []int{31},
-		PlaintextModulus: 0x10001,
+		LogN: 12,
+		LogQ: []int{39, 39},
+		LogP: []int{31},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntScaleInvariantParamsN13QP218 is an example parameter set for the `heint` package with logN=13 and logQP=218.
 	// These parameters expect the user to use the scale invariant tensoring (i.e. Evaluator.MulScaleInvariant).
 	HEIntScaleInvariantParamsN13QP218 = heint.ParametersLiteral{
-		LogN:             13,
-		LogQ:             []int{55, 54, 54},
-		LogP:             []int{55},
-		PlaintextModulus: 0x10001,
+		LogN: 13,
+		LogQ: []int{55, 54, 54},
+		LogP: []int{55},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntScaleInvariantParamsN14QP438 is an example parameter set for the `heint` package with logN=14 and logQP=438.
 	// These parameters expect the user to use the scale invariant tensoring (i.e. Evaluator.MulScaleInvariant).
 	HEIntScaleInvariantParamsN14QP438 = heint.ParametersLiteral{
-		LogN:             14,
-		LogQ:             []int{55, 55, 55, 54, 54, 54},
-		LogP:             []int{56, 55},
-		PlaintextModulus: 0x10001,
+		LogN: 14,
+		LogQ: []int{55, 55, 55, 54, 54, 54},
+		LogP: []int{56, 55},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEIntScaleInvariantParamsN15QP880 is an example parameter set for the `heint` package with logN=15 and logQP=881.
 	// These parameters expect the user to use the scale invariant tensoring (i.e. Evaluator.MulScaleInvariant).
 	HEIntScaleInvariantParamsN15QP880 = heint.ParametersLiteral{
-		LogN:             15,
-		LogQ:             []int{60, 60, 59, 58, 58, 58, 58, 58, 58, 58, 58, 58},
-		LogP:             []int{60, 60, 60},
-		PlaintextModulus: 0x10001,
+		LogN: 15,
+		LogQ: []int{60, 60, 59, 58, 58, 58, 58, 58, 58, 58, 58, 58},
+		LogP: []int{60, 60, 60},
+		T:    0x10001,
+		R:    1,
 	}
 
 	// HEFloatComplexParamsN12QP109 is an example parameter set for the `hefloat` package with logN=12 and logQP=109.

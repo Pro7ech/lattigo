@@ -1,0 +1,45 @@
+name: Bug Report
+description: File a bug report.
+title: "Bug [package]: "
+labels: ["bug"]
+assignees:
+  - Pro7ech
+body:
+  - type: input
+    id: contact
+    attributes:
+      label: Contact Details
+      description: How can we get in touch with you if we need more info?
+      placeholder: ex. email@example.com
+    validations:
+      required: false
+  - type: dropdown
+    id: version
+    attributes:
+      label: Does this issue still happens with the latest release (@latest) ?
+      options:
+        - "Yes"
+        - "No"
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Please describe what you were trying to do, what you where expecting to happen and what actually happened.
+      value: "Describe what happened"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Please copy and paste any relevant log output, they will be automatically formatted into code.
+      render: shell
+  - type: textarea
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      description: Please provide a short self-contained main.go that reproduces the issue, along with the go.mod and go.sum if necessary.
+  

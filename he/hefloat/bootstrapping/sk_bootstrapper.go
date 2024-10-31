@@ -1,9 +1,9 @@
 package bootstrapping
 
 import (
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // SecretKeyBootstrapper is an implementation of the rlwe.Bootstrapping interface that
@@ -14,7 +14,7 @@ type SecretKeyBootstrapper struct {
 	*rlwe.Decryptor
 	*rlwe.Encryptor
 	sk       *rlwe.SecretKey
-	Values   []*bignum.Complex
+	Values   []bignum.Complex
 	Counter  int // records the number of bootstrapping
 	MinLevel int
 }
@@ -26,7 +26,7 @@ func NewSecretKeyBootstrapper(params hefloat.Parameters, sk *rlwe.SecretKey) *Se
 		Decryptor:  rlwe.NewDecryptor(params, sk),
 		Encryptor:  rlwe.NewEncryptor(params, sk),
 		sk:         sk,
-		Values:     make([]*bignum.Complex, params.N())}
+		Values:     make([]bignum.Complex, params.N())}
 }
 
 func (d *SecretKeyBootstrapper) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
@@ -40,7 +40,8 @@ func (d *SecretKeyBootstrapper) Bootstrap(ct *rlwe.Ciphertext) (*rlwe.Ciphertext
 	if err := d.Encode(values, pt); err != nil {
 		return nil, err
 	}
-	ct.Resize(1, d.MaxLevel())
+	ct.ResizeQ(d.MaxLevel())
+	ct.ResizeDegree(1)
 	d.Counter++
 	return ct, d.Encrypt(pt, ct)
 }

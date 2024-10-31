@@ -6,39 +6,38 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"testing"
 
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils"
+	"github.com/Pro7ech/lattigo/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
 )
 
 var nbParties = int(5)
 
 var flagParamString = flag.String("params", "", "specify the test cryptographic parameters as a JSON string. Overrides -short and -long.")
 
-func testString(params rlwe.Parameters, opname string, levelQ, levelP, bpw2 int) string {
-	return fmt.Sprintf("%s/logN=%d/#Qi=%d/#Pi=%d/Pw2=%d/NTT=%t/RingType=%s/Parties=%d",
+func testString(params rlwe.Parameters, opname string, LevelQ, LevelP int, dd rlwe.DigitDecomposition) string {
+	return fmt.Sprintf("%s/logN=%d/#Qi=%d/#Pi=%d/Digits=%s/NTT=%t/RingType=%s/Parties=%d",
 		opname,
 		params.LogN(),
-		levelQ+1,
-		levelP+1,
-		bpw2,
+		LevelQ+1,
+		LevelP+1,
+		dd.ToString(),
 		params.NTTFlag(),
 		params.RingType(),
 		nbParties)
 }
 
 type testContext struct {
-	params         rlwe.Parameters
-	kgen           *rlwe.KeyGenerator
-	skShares       []*rlwe.SecretKey
-	skIdeal        *rlwe.SecretKey
-	uniformSampler *ring.UniformSampler
-	crs            sampling.PRNG
+	params   rlwe.Parameters
+	kgen     *rlwe.KeyGenerator
+	skShares []*rlwe.SecretKey
+	skIdeal  *rlwe.SecretKey
 }
 
 func newTestContext(params rlwe.Parameters) *testContext {
@@ -46,15 +45,19 @@ func newTestContext(params rlwe.Parameters) *testContext {
 	kgen := rlwe.NewKeyGenerator(params)
 	skShares := make([]*rlwe.SecretKey, nbParties)
 	skIdeal := rlwe.NewSecretKey(params)
+
+	rQ := params.RingQ()
+	rP := params.RingP()
+
 	for i := range skShares {
 		skShares[i] = kgen.GenSecretKeyNew()
-		params.RingQP().Add(skIdeal.Value, skShares[i].Value, skIdeal.Value)
+		rQ.Add(skIdeal.Q, skShares[i].Q, skIdeal.Q)
+		if rP != nil {
+			rP.Add(skIdeal.P, skShares[i].P, skIdeal.P)
+		}
 	}
 
-	prng, _ := sampling.NewKeyedPRNG([]byte{'t', 'e', 's', 't'})
-	unifSampler := ring.NewUniformSampler(prng, params.RingQ())
-
-	return &testContext{params, kgen, skShares, skIdeal, unifSampler, prng}
+	return &testContext{params, kgen, skShares, skIdeal}
 }
 
 func (tc testContext) nParties() int {
@@ -75,51 +78,56 @@ func TestMHE(t *testing.T) {
 		defaultParamsLiteral = []TestParametersLiteral{jsonParams} // the custom test suite reads the parameters from the -params flag
 	}
 
-	for _, paramsLit := range defaultParamsLiteral {
+	for _, paramsLit := range defaultParamsLiteral[:] {
 
-		bpw2 := paramsLit.BaseTwoDecomposition
+		dd := paramsLit.DigitDecomposition
 
-		for _, NTTFlag := range []bool{true, false} {
+		for _, RingType := range []ring.Type{ring.Standard, ring.ConjugateInvariant}[:] {
 
-			for _, RingType := range []ring.Type{ring.Standard, ring.ConjugateInvariant}[:] {
+			paramsLit.RingType = RingType
 
-				paramsLit.NTTFlag = NTTFlag
-				paramsLit.RingType = RingType
+			var params rlwe.Parameters
+			if params, err = rlwe.NewParametersFromLiteral(paramsLit.ParametersLiteral); err != nil {
+				t.Fatal(err)
+			}
 
-				var params rlwe.Parameters
-				if params, err = rlwe.NewParametersFromLiteral(paramsLit.ParametersLiteral); err != nil {
-					t.Fatal(err)
-				}
+			tc := newTestContext(params)
 
-				tc := newTestContext(params)
+			testPublicKeyProtocol(tc, params.MaxLevelQ(), params.MaxLevelP(), dd, t)
+			testThreshold(tc, params.MaxLevelQ(), params.MaxLevelP(), dd, t)
+			testRefreshShare(tc, params.MaxLevelQ(), params.MaxLevelP(), dd, t)
+			testCircularGadgetCiphertextProtocol(tc, dd, t)
+			testCircularCiphertextProtocol(tc, dd, t)
 
-				testPublicKeyGenProtocol(tc, params.MaxLevelQ(), params.MaxLevelP(), bpw2, t)
-				testThreshold(tc, params.MaxLevelQ(), params.MaxLevelP(), bpw2, t)
-				testRefreshShare(tc, params.MaxLevelQ(), params.MaxLevelP(), bpw2, t)
+			levelsQ := []int{0}
 
-				levelsQ := []int{0}
-				levelsP := []int{0}
+			if params.MaxLevelQ() > 0 {
+				levelsQ = append(levelsQ, params.MaxLevelQ())
+			}
 
-				if params.MaxLevelQ() > 0 {
-					levelsQ = append(levelsQ, params.MaxLevelQ())
-				}
+			var levelsP []int
+			if params.MaxLevelP() > 0 {
+				levelsP = []int{0, params.MaxLevelP()}
+			} else if params.MaxLevelP() == 0 {
+				levelsP = []int{0}
+			} else {
+				levelsP = []int{-1}
+			}
+			_ = levelsP
 
-				if params.MaxLevelP() > 0 {
-					levelsP = append(levelsP, params.MaxLevelP())
-				}
+			runtime.GC()
 
-				for _, levelQ := range levelsQ {
-					for _, levelP := range levelsP {
-						for _, testSet := range []func(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T){
-							testEvaluationKeyGenProtocol,
-							testRelinearizationKeyGenProtocol,
-							testGaloisKeyGenProtocol,
-							testKeySwitchProtocol,
-							testPublicKeySwitchProtocol,
-						} {
-							testSet(tc, levelQ, levelP, bpw2, t)
-							runtime.GC()
-						}
+			for _, LevelQ := range levelsQ[:] {
+				for _, LevelP := range levelsP[:] {
+					for _, testSet := range []func(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T){
+						testGadgetCiphertextProtocol,
+						testEvaluationKeyProtocol,
+						testRelinearizationKeyProtocol,
+						testGaloisKeyProtocol,
+						testKeySwitchProtocol,
+					} {
+						testSet(tc, LevelQ, LevelP, dd, t)
+						runtime.GC()
 					}
 				}
 			}
@@ -127,398 +135,599 @@ func TestMHE(t *testing.T) {
 	}
 }
 
-func testPublicKeyGenProtocol(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
+func testCircularGadgetCiphertextProtocol(tc *testContext, dd rlwe.DigitDecomposition, t *testing.T) {
 
 	params := tc.params
+	LevelQ := params.MaxLevelQ()
+	LevelP := params.MaxLevelP()
 
-	t.Run(testString(params, "PublicKeyGen/Protocol", levelQ, levelP, bpw2), func(t *testing.T) {
+	t.Run(testString(params, "CircularGadgetCiphertextProtocol", LevelQ, LevelP, dd), func(t *testing.T) {
 
-		ckg := make([]PublicKeyGenProtocol, nbParties)
-		for i := range ckg {
+		type Party struct {
+			CircularGadgetCiphertextProtocol
+			share  *CircularGadgetCiphertextShare
+			m      *rlwe.Plaintext
+			u      *rlwe.SecretKey
+			uShare *GadgetCiphertextShare
+		}
+
+		P := make([]*Party, nbParties)
+
+		seedU := [32]byte{0xFF}
+		seedM := [32]byte{0xFE}
+		ddGRLWEU := rlwe.DigitDecomposition{Type: rlwe.Unsigned, Log2Basis: 13}
+
+		var err error
+		for i := range P {
+
+			party := &Party{}
+
 			if i == 0 {
-				ckg[i] = NewPublicKeyGenProtocol(params)
+				party.CircularGadgetCiphertextProtocol = *NewCircularGadgetCiphertextProtocol(params, 15)
 			} else {
-				ckg[i] = ckg[0].ShallowCopy()
+				party.CircularGadgetCiphertextProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(dd)
+			party.u, party.uShare, err = party.GenEphemeralSecret(tc.skShares[i], seedU, ddGRLWEU)
+			require.NoError(t, err)
+			party.m = tc.skShares[i].AsPlaintext()
+
+			require.NoError(t, party.Gen(tc.skShares[i], party.u, party.m, seedM, party.share))
+
+			P[i] = party
+		}
+
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].uShare.Aggregate(P[0].GetRLWEParameters(), P[0].uShare, P[i].uShare))
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
 			}
 		}
 
-		shares := make([]PublicKeyGenShare, nbParties)
-		for i := range shares {
-			shares[i] = ckg[i].AllocateShare()
+		GRLWEU := P[0].uShare.AsGadgetCiphertext(P[0].GetRLWEParameters())
+
+		GRLWERLK := rlwe.NewGadgetCiphertext(params, 1, LevelQ, LevelP, dd)
+		require.NoError(t, P[0].Finalize(P[0].share, GRLWEU, GRLWERLK))
+
+		// sum(s) * sum(s)
+		mGlobal := rlwe.NewPlaintext(params, LevelQ, -1)
+		params.RingQ().AtLevel(LevelQ).MulCoeffsMontgomery(tc.skIdeal.Q, tc.skIdeal.Q, mGlobal.Q)
+
+		require.GreaterOrEqual(t, 16.0, rlwe.NoiseGadgetCiphertext(GRLWERLK, mGlobal.Q, tc.skIdeal, params))
+	})
+}
+
+func testCircularCiphertextProtocol(tc *testContext, dd rlwe.DigitDecomposition, t *testing.T) {
+
+	params := tc.params
+	LevelQ := params.MaxLevelQ()
+	LevelP := params.MaxLevelP()
+
+	t.Run(testString(params, "CircularCiphertextProtocol", LevelQ, LevelP, dd), func(t *testing.T) {
+
+		type Party struct {
+			CircularCiphertextProtocol
+			share  *CircularCiphertextShare
+			m      *rlwe.Plaintext
+			u      *rlwe.SecretKey
+			uShare *GadgetCiphertextShare
 		}
 
-		crp := ckg[0].SampleCRP(tc.crs)
+		seedU := [32]byte{0xFF}
+		seedM := [32]byte{0xFE}
+		ddGRLWEU := rlwe.DigitDecomposition{Type: rlwe.Signed, Log2Basis: 16}
 
-		for i := range shares {
-			ckg[i].GenShare(tc.skShares[i], crp, &shares[i])
+		P := make([]*Party, nbParties)
+
+		rQ := params.RingQ().AtLevel(LevelQ)
+
+		source := sampling.NewSource(sampling.NewSeed())
+
+		var err error
+		for i := range P {
+
+			party := &Party{}
+
+			if i == 0 {
+				party.CircularCiphertextProtocol = *NewCircularCiphertextProtocol(params)
+			} else {
+				party.CircularCiphertextProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate()
+			party.u, party.uShare, err = party.GenEphemeralSecret(tc.skShares[i], seedU, ddGRLWEU)
+			require.NoError(t, err)
+
+			party.m = rlwe.NewPlaintext(params, LevelQ, -1)
+			party.m.Randomize(params, source)
+
+			require.NoError(t, party.Gen(tc.skShares[i], party.u, party.m, seedM, party.share))
+
+			P[i] = party
 		}
 
-		for i := 1; i < nbParties; i++ {
-			ckg[0].AggregateShares(shares[0], shares[i], &shares[0])
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].uShare.Aggregate(P[0].GetRLWEParameters(), P[0].uShare, P[i].uShare))
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
+			}
 		}
 
-		// Test binary encoding
-		buffer.RequireSerializerCorrect(t, &shares[0])
+		GRLWEU := P[0].uShare.AsGadgetCiphertext(P[0].GetRLWEParameters())
+
+		ct := rlwe.NewCiphertext(params, 1, LevelQ, -1)
+		require.NoError(t, P[0].Finalize(P[0].share, GRLWEU, ct))
+
+		// sum(m_{i}) * sum(s)
+		mGlobal := rlwe.NewPlaintext(params, LevelQ, -1)
+		for i := range P {
+			rQ.Add(mGlobal.Q, P[i].m.Q, mGlobal.Q)
+		}
+
+		rQ.MulCoeffsMontgomery(mGlobal.Q, tc.skIdeal.Q, mGlobal.Q)
+
+		noise := math.Log2(NoiseCircularCiphertext(params, params.MaxLevelP() > -1, slices.Max(GRLWEU.Dims()), ddGRLWEU.Log2Basis, nbParties))
+
+		require.GreaterOrEqual(t, noise+1, rlwe.NoiseCiphertext(ct, mGlobal, tc.skIdeal, tc.params))
+
+	})
+}
+
+func testPublicKeyProtocol(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
+
+	params := tc.params
+
+	t.Run(testString(params, "PublicKeyProtocol", LevelQ, LevelP, dd), func(t *testing.T) {
+
+		type Party struct {
+			PublicKeyProtocol
+			share *PublicKeyShare
+		}
+
+		seed := [32]byte{0xFF}
+
+		P := make([]*Party, nbParties)
+
+		for i := range P {
+
+			party := &Party{}
+
+			if i == 0 {
+				party.PublicKeyProtocol = *NewPublicKeyProtocol(params)
+			} else {
+				party.PublicKeyProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate()
+
+			require.NoError(t, party.Gen(tc.skShares[i], seed, party.share))
+
+			P[i] = party
+		}
+
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
+			}
+		}
 
 		pk := rlwe.NewPublicKey(params)
-		ckg[0].GenPublicKey(shares[0], crp, pk)
+		require.NoError(t, P[0].Finalize(P[0].share, pk))
 
 		require.GreaterOrEqual(t, math.Log2(math.Sqrt(float64(nbParties))*params.NoiseFreshSK())+1, rlwe.NoisePublicKey(pk, tc.skIdeal, params))
 	})
 }
 
-func testRelinearizationKeyGenProtocol(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
+func testGadgetCiphertextProtocol(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
 
 	params := tc.params
 
-	t.Run(testString(params, "RelinearizationKeyGen/Protocol", levelQ, levelP, bpw2), func(t *testing.T) {
+	t.Run(testString(params, "GadgetCiphertextProtocol", LevelQ, LevelP, dd), func(t *testing.T) {
 
-		evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), BaseTwoDecomposition: utils.Pointy(bpw2)}
-
-		rkg := make([]RelinearizationKeyGenProtocol, nbParties)
-
-		for i := range rkg {
-			if i == 0 {
-				rkg[i] = NewRelinearizationKeyGenProtocol(params)
-			} else {
-				rkg[i] = rkg[0].ShallowCopy()
-			}
+		type Party struct {
+			GadgetCiphertextProtocol
+			share *GadgetCiphertextShare
+			pt    *rlwe.Plaintext
 		}
 
-		ephSk := make([]*rlwe.SecretKey, nbParties)
-		share1 := make([]RelinearizationKeyGenShare, nbParties)
-		share2 := make([]RelinearizationKeyGenShare, nbParties)
-
-		for i := range rkg {
-			ephSk[i], share1[i], share2[i] = rkg[i].AllocateShare(evkParams)
-		}
-
-		crp := rkg[0].SampleCRP(tc.crs, evkParams)
-		for i := range rkg {
-			rkg[i].GenShareRoundOne(tc.skShares[i], crp, ephSk[i], &share1[i])
-		}
-
-		for i := 1; i < nbParties; i++ {
-			rkg[0].AggregateShares(share1[0], share1[i], &share1[0])
-		}
-
-		// Test binary encoding
-		buffer.RequireSerializerCorrect(t, &share1[0])
-
-		for i := range rkg {
-			rkg[i].GenShareRoundTwo(ephSk[i], tc.skShares[i], share1[0], &share2[i])
-		}
-
-		for i := 1; i < nbParties; i++ {
-			rkg[0].AggregateShares(share2[0], share2[i], &share2[0])
-		}
-
-		rlk := rlwe.NewRelinearizationKey(params, evkParams)
-		rkg[0].GenRelinearizationKey(share1[0], share2[0], rlk)
-
-		BaseRNSDecompositionVectorSize := params.BaseRNSDecompositionVectorSize(levelQ, levelP)
-
-		noiseBound := math.Log2(math.Sqrt(float64(BaseRNSDecompositionVectorSize))*NoiseRelinearizationKey(params, nbParties)) + 1
-
-		require.GreaterOrEqual(t, noiseBound, rlwe.NoiseRelinearizationKey(rlk, tc.skIdeal, params))
-	})
-}
-
-func testEvaluationKeyGenProtocol(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
-
-	params := tc.params
-
-	t.Run(testString(params, "EvaluationKeyGen", levelQ, levelP, bpw2), func(t *testing.T) {
-
-		evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), BaseTwoDecomposition: utils.Pointy(bpw2)}
-
-		evkg := make([]EvaluationKeyGenProtocol, nbParties)
-		for i := range evkg {
-			if i == 0 {
-				evkg[i] = NewEvaluationKeyGenProtocol(params)
-			} else {
-				evkg[i] = evkg[0].ShallowCopy()
-			}
-		}
+		P := make([]*Party, nbParties)
 
 		kgen := rlwe.NewKeyGenerator(params)
 
-		skOutShares := make([]*rlwe.SecretKey, nbParties)
-		skOutIdeal := rlwe.NewSecretKey(params)
-		for i := range skOutShares {
-			skOutShares[i] = kgen.GenSecretKeyNew()
-			params.RingQP().Add(skOutIdeal.Value, skOutShares[i].Value, skOutIdeal.Value)
+		seed := [32]byte{0xFF}
+
+		for i := range P {
+
+			party := &Party{}
+
+			if i == 0 {
+				party.GadgetCiphertextProtocol = *NewGadgetCiphertextProtocol(params)
+			} else {
+				party.GadgetCiphertextProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(LevelQ, LevelP, dd)
+			party.pt = kgen.GenSecretKeyNew().AsPlaintext()
+
+			require.NoError(t, party.Gen(tc.skShares[i], party.pt, seed, party.share))
+
+			P[i] = party
 		}
 
-		shares := make([]EvaluationKeyGenShare, nbParties)
-		for i := range shares {
-			shares[i] = evkg[i].AllocateShare(evkParams)
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
+			}
 		}
 
-		crp := evkg[0].SampleCRP(tc.crs, evkParams)
+		gct := rlwe.NewGadgetCiphertext(params, 2, LevelQ, LevelP, dd)
+		require.NoError(t, P[0].Finalize(P[0].share, gct))
 
-		for i := range shares {
-			evkg[i].GenShare(tc.skShares[i], skOutShares[i], crp, &shares[i])
+		ptGlobal := rlwe.NewPlaintext(params, LevelQ, -1)
+		rQ := params.RingQ().AtLevel(ptGlobal.Level())
+		for i := range P {
+			rQ.Add(ptGlobal.Q, P[i].pt.Q, ptGlobal.Q)
 		}
 
-		for i := 1; i < nbParties; i++ {
-			evkg[0].AggregateShares(shares[0], shares[i], &shares[0])
+		noiseBound := math.Log2(math.Sqrt(float64(len(gct.Dims())))*NoiseGadgetCiphertext(params, nbParties)) + 1
+
+		require.GreaterOrEqual(t, noiseBound, rlwe.NoiseGadgetCiphertext(gct, ptGlobal.Q, tc.skIdeal, params))
+	})
+}
+
+func testEvaluationKeyProtocol(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
+
+	params := tc.params
+
+	t.Run(testString(params, "EvaluationKeyGen", LevelQ, LevelP, dd), func(t *testing.T) {
+
+		evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(LevelQ), LevelP: utils.Pointy(LevelP), DigitDecomposition: dd}
+
+		type Party struct {
+			EvaluationKeyProtocol
+			share *EvaluationKeyShare
+			skOut *rlwe.SecretKey
 		}
 
-		// Test binary encoding
-		buffer.RequireSerializerCorrect(t, &shares[0])
+		P := make([]*Party, nbParties)
+
+		kgen := rlwe.NewKeyGenerator(params)
+
+		seed := [32]byte{0xFF}
+
+		for i := range P {
+
+			party := &Party{}
+
+			if i == 0 {
+				party.EvaluationKeyProtocol = *NewEvaluationKeyProtocol(params)
+			} else {
+				party.EvaluationKeyProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(evkParams)
+			party.skOut = kgen.GenSecretKeyNew()
+
+			require.NoError(t, party.Gen(tc.skShares[i], party.skOut, seed, party.share))
+
+			P[i] = party
+		}
+
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
+			}
+		}
 
 		evk := rlwe.NewEvaluationKey(params, evkParams)
-		evkg[0].GenEvaluationKey(shares[0], crp, evk)
+		require.NoError(t, P[0].Finalize(P[0].share, evk))
 
-		BaseRNSDecompositionVectorSize := params.BaseRNSDecompositionVectorSize(levelQ, levelP)
+		skOutIdeal := rlwe.NewSecretKey(params)
+		rQ := params.RingQ()
+		rP := params.RingP()
+		for i := range P {
+			rQ.Add(skOutIdeal.Q, P[i].skOut.Q, skOutIdeal.Q)
+			if rP != nil {
+				rP.Add(skOutIdeal.P, P[i].skOut.P, skOutIdeal.P)
+			}
+		}
 
-		noiseBound := math.Log2(math.Sqrt(float64(BaseRNSDecompositionVectorSize))*NoiseEvaluationKey(params, nbParties)) + 1
+		noiseBound := math.Log2(math.Sqrt(float64(len(evk.Dims())))*NoiseEvaluationKey(params, nbParties)) + 1
 
 		require.GreaterOrEqual(t, noiseBound, rlwe.NoiseEvaluationKey(evk, tc.skIdeal, skOutIdeal, params))
 	})
 }
 
-func testGaloisKeyGenProtocol(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
+func testGaloisKeyProtocol(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
 
 	params := tc.params
 
-	t.Run(testString(params, "GaloisKeyGenProtocol", levelQ, levelP, bpw2), func(t *testing.T) {
+	t.Run(testString(params, "GaloisKeyGenProtocol", LevelQ, LevelP, dd), func(t *testing.T) {
 
-		evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), BaseTwoDecomposition: utils.Pointy(bpw2)}
+		evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(LevelQ), LevelP: utils.Pointy(LevelP), DigitDecomposition: dd}
 
-		gkg := make([]GaloisKeyGenProtocol, nbParties)
-		for i := range gkg {
-			if i == 0 {
-				gkg[i] = NewGaloisKeyGenProtocol(params)
-			} else {
-				gkg[i] = gkg[0].ShallowCopy()
-			}
+		type Party struct {
+			GaloisKeyProtocol
+			share *GaloisKeyShare
 		}
 
-		shares := make([]GaloisKeyGenShare, nbParties)
-		for i := range shares {
-			shares[i] = gkg[i].AllocateShare(evkParams)
-		}
+		P := make([]*Party, nbParties)
 
-		crp := gkg[0].SampleCRP(tc.crs, evkParams)
+		seed := [32]byte{0xFF}
 
 		galEl := params.GaloisElement(64)
 
-		for i := range shares {
-			gkg[i].GenShare(tc.skShares[i], galEl, crp, &shares[i])
+		for i := range P {
+
+			party := &Party{}
+
+			if i == 0 {
+				party.GaloisKeyProtocol = *NewGaloisKeyProtocol(params)
+			} else {
+				party.GaloisKeyProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(evkParams)
+
+			require.NoError(t, party.Gen(tc.skShares[i], galEl, seed, party.share))
+
+			P[i] = party
 		}
 
-		for i := 1; i < nbParties; i++ {
-			gkg[0].AggregateShares(shares[0], shares[i], &shares[0])
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
+			}
 		}
 
-		// Test binary encoding
-		buffer.RequireSerializerCorrect(t, &shares[0])
+		gk := rlwe.NewGaloisKey(params, evkParams)
+		require.NoError(t, P[0].Finalize(P[0].share, gk))
 
-		galoisKey := rlwe.NewGaloisKey(params, evkParams)
-		gkg[0].GenGaloisKey(shares[0], crp, galoisKey)
+		noiseBound := math.Log2(math.Sqrt(float64(len(gk.Dims())))*NoiseGaloisKey(params, nbParties)) + 1
 
-		BaseRNSDecompositionVectorSize := params.BaseRNSDecompositionVectorSize(levelQ, levelP)
-
-		noiseBound := math.Log2(math.Sqrt(float64(BaseRNSDecompositionVectorSize))*NoiseGaloisKey(params, nbParties)) + 1
-
-		require.GreaterOrEqual(t, noiseBound, rlwe.NoiseGaloisKey(galoisKey, tc.skIdeal, params))
+		require.GreaterOrEqual(t, noiseBound, rlwe.NoiseGaloisKey(gk, tc.skIdeal, params))
 	})
 }
 
-func testKeySwitchProtocol(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
+func testRelinearizationKeyProtocol(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
 
 	params := tc.params
 
-	t.Run(testString(params, "KeySwitch/Protocol", levelQ, levelP, bpw2), func(t *testing.T) {
+	t.Run(testString(params, "RelinearizationKeyProtocol", LevelQ, LevelP, dd), func(t *testing.T) {
 
-		cks := make([]KeySwitchProtocol, nbParties)
+		evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(LevelQ), LevelP: utils.Pointy(LevelP), DigitDecomposition: dd}
 
-		sigmaSmudging := 8 * rlwe.DefaultNoise
+		type Party struct {
+			RelinearizationKeyProtocol
+			share *RelinearizationKeyShare
+		}
 
-		var err error
-		for i := range cks {
+		pk := tc.kgen.GenPublicKeyNew(tc.skIdeal)
+
+		P := make([]*Party, nbParties)
+
+		for i := range P {
+
+			party := &Party{}
+
 			if i == 0 {
-				cks[i], err = NewKeySwitchProtocol(params, ring.DiscreteGaussian{Sigma: sigmaSmudging, Bound: 6 * sigmaSmudging})
-				require.NoError(t, err)
+				party.RelinearizationKeyProtocol = *NewRelinearizationKeyProtocol(params)
 			} else {
-				cks[i] = cks[0].ShallowCopy()
+				party.RelinearizationKeyProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(evkParams)
+
+			require.NoError(t, party.Gen(tc.skShares[i], pk, party.share))
+
+			P[i] = party
+		}
+
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
 			}
 		}
 
-		skout := make([]*rlwe.SecretKey, nbParties)
+		rlk := rlwe.NewRelinearizationKey(params, evkParams)
+		require.NoError(t, P[0].Finalize(P[0].share, rlk))
+
+		noiseBound := math.Log2(math.Sqrt(float64(len(rlk.Dims())))*NoiseRelinearizationKey(params, nbParties)) + 1
+
+		require.GreaterOrEqual(t, noiseBound, rlwe.NoiseRelinearizationKey(rlk, tc.skIdeal, params))
+	})
+}
+
+func testKeySwitchProtocol(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
+
+	params := tc.params
+
+	t.Run(testString(params, "KeySwitchingProtocol/Sk", LevelQ, LevelP, dd), func(t *testing.T) {
+
+		type Party struct {
+			KeySwitchingProtocol[rlwe.SecretKey]
+			share *KeySwitchingShare
+			skOut *rlwe.SecretKey
+		}
+
+		P := make([]*Party, nbParties)
+
+		ct := rlwe.NewCiphertext(params, 1, LevelQ, -1)
+		require.NoError(t, rlwe.NewEncryptor(params, tc.skIdeal).EncryptZero(ct))
+
+		sigmaSmudging := 8.0 * rlwe.DefaultNoise
+
+		for i := range P {
+
+			party := &Party{}
+
+			if i == 0 {
+				party.KeySwitchingProtocol = *NewKeySwitchingProtocol[rlwe.SecretKey](params)
+			} else {
+				party.KeySwitchingProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(ct.Level())
+			party.skOut = tc.kgen.GenSecretKeyNew()
+
+			require.NoError(t, party.Gen(tc.skShares[i], party.skOut, sigmaSmudging, ct, party.share))
+
+			P[i] = party
+		}
+
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
+			}
+		}
+
+		require.NoError(t, P[0].Finalize(ct, P[0].share, ct))
+
 		skOutIdeal := rlwe.NewSecretKey(params)
-		for i := range skout {
-			skout[i] = tc.kgen.GenSecretKeyNew()
-			params.RingQP().Add(skOutIdeal.Value, skout[i].Value, skOutIdeal.Value)
+		rQ := params.RingQ().AtLevel(LevelQ)
+		for i := range P {
+			rQ.Add(skOutIdeal.Q, P[i].skOut.Q, skOutIdeal.Q)
 		}
-
-		ct := rlwe.NewCiphertext(params, 1, levelQ)
-		rlwe.NewEncryptor(params, tc.skIdeal).EncryptZero(ct)
-
-		shares := make([]KeySwitchShare, nbParties)
-		for i := range shares {
-			shares[i] = cks[i].AllocateShare(ct.Level())
-		}
-
-		for i := range shares {
-			cks[i].GenShare(tc.skShares[i], skout[i], ct, &shares[i])
-			if i > 0 {
-				cks[0].AggregateShares(shares[0], shares[i], &shares[0])
-			}
-		}
-
-		// Test binary encoding
-		buffer.RequireSerializerCorrect(t, &shares[0])
-
-		ksCt := rlwe.NewCiphertext(params, 1, ct.Level())
 
 		dec := rlwe.NewDecryptor(params, skOutIdeal)
 
-		cks[0].KeySwitch(ct, shares[0], ksCt)
-
-		pt := rlwe.NewPlaintext(params, ct.Level())
-
-		dec.Decrypt(ksCt, pt)
-
-		ringQ := params.RingQ().AtLevel(ct.Level())
-
-		if pt.IsNTT {
-			ringQ.INTT(pt.Value, pt.Value)
-		}
-
-		require.GreaterOrEqual(t, math.Log2(NoiseKeySwitch(params, nbParties, params.NoiseFreshSK(), float64(sigmaSmudging)))+1, ringQ.Log2OfStandardDeviation(pt.Value))
-
-		cks[0].KeySwitch(ct, shares[0], ct)
+		pt := rlwe.NewPlaintext(params, ct.Level(), -1)
 
 		dec.Decrypt(ct, pt)
 
 		if pt.IsNTT {
-			ringQ.INTT(pt.Value, pt.Value)
+			rQ.INTT(pt.Q, pt.Q)
 		}
 
-		require.GreaterOrEqual(t, math.Log2(NoiseKeySwitch(params, nbParties, params.NoiseFreshSK(), float64(sigmaSmudging)))+1, ringQ.Log2OfStandardDeviation(pt.Value))
+		require.GreaterOrEqual(t, math.Log2(NoiseKeySwitch(nbParties, params.NoiseFreshSK(), params.NoiseFreshSK(), sigmaSmudging))+1, rQ.Stats(pt.Q)[0])
 	})
-}
 
-func testPublicKeySwitchProtocol(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
+	t.Run(testString(params, "KeySwitchingProtocol/Pk", LevelQ, LevelP, dd), func(t *testing.T) {
 
-	params := tc.params
+		type Party struct {
+			KeySwitchingProtocol[rlwe.PublicKey]
+			share *KeySwitchingShare
+		}
 
-	t.Run(testString(params, "PublicKeySwitch/Protocol", levelQ, levelP, bpw2), func(t *testing.T) {
+		P := make([]*Party, nbParties)
 
 		skOut, pkOut := tc.kgen.GenKeyPairNew()
 
-		sigmaSmudging := 8 * rlwe.DefaultNoise
+		ct := rlwe.NewCiphertext(params, 1, LevelQ, -1)
+		require.NoError(t, rlwe.NewEncryptor(params, tc.skIdeal).EncryptZero(ct))
 
-		pcks := make([]PublicKeySwitchProtocol, nbParties)
-		var err error
-		for i := range pcks {
+		sigmaSmudging := 8.0 * rlwe.DefaultNoise
+
+		for i := range P {
+
+			party := &Party{}
+
 			if i == 0 {
-				pcks[i], err = NewPublicKeySwitchProtocol(params, ring.DiscreteGaussian{Sigma: sigmaSmudging, Bound: 6 * sigmaSmudging})
-				require.NoError(t, err)
+				party.KeySwitchingProtocol = *NewKeySwitchingProtocol[rlwe.PublicKey](params)
 			} else {
-				pcks[i] = pcks[0].ShallowCopy()
+				party.KeySwitchingProtocol = *P[0].ShallowCopy()
+			}
+
+			party.share = party.Allocate(ct.Level())
+			party.Sk = skOut
+
+			require.NoError(t, party.Gen(tc.skShares[i], pkOut, sigmaSmudging, ct, party.share))
+
+			P[i] = party
+		}
+
+		buffer.RequireSerializerCorrect(t, P[0].share)
+
+		for i := range P {
+			if i != 0 {
+				require.NoError(t, P[0].Aggregate(P[0].share, P[i].share, P[0].share))
 			}
 		}
 
-		ct := rlwe.NewCiphertext(params, 1, levelQ)
+		require.NoError(t, P[0].Finalize(ct, P[0].share, ct))
 
-		rlwe.NewEncryptor(params, tc.skIdeal).EncryptZero(ct)
-
-		shares := make([]PublicKeySwitchShare, nbParties)
-		for i := range shares {
-			shares[i] = pcks[i].AllocateShare(ct.Level())
-		}
-
-		for i := range shares {
-			pcks[i].GenShare(tc.skShares[i], pkOut, ct, &shares[i])
-		}
-
-		for i := 1; i < nbParties; i++ {
-			pcks[0].AggregateShares(shares[0], shares[i], &shares[0])
-		}
-
-		// Test binary encoding
-		buffer.RequireSerializerCorrect(t, &shares[0])
-
-		ksCt := rlwe.NewCiphertext(params, 1, levelQ)
 		dec := rlwe.NewDecryptor(params, skOut)
 
-		pcks[0].KeySwitch(ct, shares[0], ksCt)
-
-		pt := rlwe.NewPlaintext(params, ct.Level())
-		dec.Decrypt(ksCt, pt)
-
-		ringQ := params.RingQ().AtLevel(ct.Level())
-
-		if pt.IsNTT {
-			ringQ.INTT(pt.Value, pt.Value)
-		}
-
-		require.GreaterOrEqual(t, math.Log2(NoisePublicKeySwitch(params, nbParties, params.NoiseFreshSK(), float64(sigmaSmudging)))+1, ringQ.Log2OfStandardDeviation(pt.Value))
-
-		pcks[0].KeySwitch(ct, shares[0], ct)
+		pt := rlwe.NewPlaintext(params, ct.Level(), -1)
 
 		dec.Decrypt(ct, pt)
 
+		rQ := params.RingQ().AtLevel(LevelQ)
+
 		if pt.IsNTT {
-			ringQ.INTT(pt.Value, pt.Value)
+			rQ.INTT(pt.Q, pt.Q)
 		}
 
-		require.GreaterOrEqual(t, math.Log2(NoisePublicKeySwitch(params, nbParties, params.NoiseFreshSK(), float64(sigmaSmudging)))+1, ringQ.Log2OfStandardDeviation(pt.Value))
+		require.GreaterOrEqual(t, math.Log2(NoiseKeySwitch(nbParties, params.NoiseFreshSK(), params.NoiseFreshPK(), sigmaSmudging))+1, rQ.Stats(pt.Q)[0])
 	})
 }
 
-func testThreshold(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
+func testThreshold(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
 	sk0Shards := tc.skShares
 
 	for _, threshold := range []int{tc.nParties() / 4, tc.nParties() / 2, tc.nParties() - 1} {
-		t.Run(testString(tc.params, "Threshold", levelQ, levelP, bpw2)+fmt.Sprintf("/threshold=%d", threshold), func(t *testing.T) {
+		t.Run(testString(tc.params, "Threshold", LevelQ, LevelP, dd)+fmt.Sprintf("/threshold=%d", threshold), func(t *testing.T) {
 
 			type Party struct {
 				Thresholdizer
 				Combiner
-				gen  ShamirPolynomial
-				sk   *rlwe.SecretKey
-				tsks ShamirSecretShare
-				tsk  *rlwe.SecretKey
-				tpk  ShamirPublicPoint
+				gen   *ShamirPolynomial
+				sk    *rlwe.SecretKey
+				share *ShamirSecretShare
+				tsk   *rlwe.SecretKey
+				tpk   ShamirPublicPoint
 			}
 
-			P := make([]*Party, tc.nParties())
+			P := make([]*Party, nbParties)
 			shamirPks := make([]ShamirPublicPoint, tc.nParties())
-			for i := 0; i < tc.nParties(); i++ {
+			for i := range P {
 				p := new(Party)
-				p.Thresholdizer = NewThresholdizer(tc.params)
+				p.Thresholdizer = *NewThresholdizer(tc.params)
 				p.sk = sk0Shards[i]
 				p.tsk = rlwe.NewSecretKey(tc.params)
 				p.tpk = ShamirPublicPoint(i + 1)
-				p.tsks = p.Thresholdizer.AllocateThresholdSecretShare()
+				p.share = p.Thresholdizer.Allocate()
 				P[i] = p
 				shamirPks[i] = p.tpk
 			}
 
+			buffer.RequireSerializerCorrect(t, P[0].share)
+
 			for _, pi := range P {
-				pi.Combiner = NewCombiner(tc.params, pi.tpk, shamirPks, threshold)
+				pi.Combiner = *NewCombiner(tc.params, pi.tpk, shamirPks, threshold)
 			}
 
-			shares := make(map[*Party]map[*Party]ShamirSecretShare, tc.nParties())
+			shares := make(map[*Party]map[*Party]*ShamirSecretShare, tc.nParties())
 			var err error
 			// Every party generates a share for every other party
 			for _, pi := range P {
 
-				pi.gen, err = pi.Thresholdizer.GenShamirPolynomial(threshold, pi.sk)
-				if err != nil {
-					t.Error(err)
-				}
+				pi.gen, err = pi.Thresholdizer.Gen(threshold, pi.sk)
+				require.NoError(t, err)
 
-				shares[pi] = make(map[*Party]ShamirSecretShare)
+				shares[pi] = make(map[*Party]*ShamirSecretShare)
 				for _, pj := range P {
-					shares[pi][pj] = pi.Thresholdizer.AllocateThresholdSecretShare()
+					shares[pi][pj] = pi.Thresholdizer.Allocate()
 					share := shares[pi][pj]
-					pi.Thresholdizer.GenShamirSecretShare(pj.tpk, pi.gen, &share)
+					require.NoError(t, pi.Thresholdizer.Finalize(pj.tpk, pi.gen, share))
 				}
 			}
 
@@ -526,12 +735,9 @@ func testThreshold(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
 			for _, pi := range P {
 				for _, pj := range P {
 					share := shares[pj][pi]
-					pi.Thresholdizer.AggregateShares(pi.tsks, share, &pi.tsks)
+					require.NoError(t, pi.Thresholdizer.Aggregate(pi.share, share, pi.share))
 				}
 			}
-
-			// Test binary encoding
-			buffer.RequireSerializerCorrect(t, &P[0].tsks)
 
 			// Determining which parties are active. In a distributed context, a party
 			// would receive the ids of active players and retrieve (or compute) the corresponding keys.
@@ -544,11 +750,15 @@ func testThreshold(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
 			// Combining
 			// Slow because each party has to generate its public key on-the-fly. In
 			// practice the public key could be precomputed from an id by parties during setup
-			ringQP := tc.params.RingQP()
+			rQ := tc.params.RingQ()
+			rP := tc.params.RingP()
 			recSk := rlwe.NewSecretKey(tc.params)
 			for _, pi := range activeParties {
-				pi.Combiner.GenAdditiveShare(activeShamirPks, pi.tpk, pi.tsks, pi.tsk)
-				ringQP.Add(pi.tsk.Value, recSk.Value, recSk.Value)
+				pi.Combiner.Finalize(activeShamirPks, pi.tpk, pi.share, pi.tsk)
+				rQ.Add(recSk.Q, pi.tsk.Q, recSk.Q)
+				if rP != nil {
+					rP.Add(recSk.P, pi.tsk.P, recSk.P)
+				}
 			}
 
 			require.True(t, tc.skIdeal.Equal(recSk)) // reconstructed key should match the ideal sk
@@ -556,21 +766,13 @@ func testThreshold(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
 	}
 }
 
-func testRefreshShare(tc *testContext, levelQ, levelP, bpw2 int, t *testing.T) {
-	t.Run(testString(tc.params, "RefreshShare", levelQ, levelP, bpw2), func(t *testing.T) {
-		params := tc.params
-		ringQ := params.RingQ().AtLevel(levelQ)
-		ciphertext := &rlwe.Ciphertext{}
-		ciphertext.Value = []ring.Poly{{}, ringQ.NewPoly()}
-		ciphertext.MetaData = &rlwe.MetaData{}
-		ciphertext.MetaData.IsNTT = true
-		tc.uniformSampler.AtLevel(levelQ).Read(ciphertext.Value[1])
-		cksp, err := NewKeySwitchProtocol(tc.params, tc.params.Xe())
-		require.NoError(t, err)
-		share1 := cksp.AllocateShare(levelQ)
-		share2 := cksp.AllocateShare(levelQ)
-		cksp.GenShare(tc.skShares[0], tc.skShares[1], ciphertext, &share1)
-		cksp.GenShare(tc.skShares[1], tc.skShares[0], ciphertext, &share2)
-		buffer.RequireSerializerCorrect(t, &RefreshShare{EncToShareShare: share1, ShareToEncShare: share2, MetaData: *ciphertext.MetaData})
+func testRefreshShare(tc *testContext, LevelQ, LevelP int, dd rlwe.DigitDecomposition, t *testing.T) {
+	t.Run(testString(tc.params, "RefreshShare", LevelQ, LevelP, dd), func(t *testing.T) {
+		p0 := *NewKeySwitchingShare(tc.params, 1, tc.params.MaxLevel())
+		p1 := *NewKeySwitchingShare(tc.params, 1, tc.params.MaxLevel())
+		source := sampling.NewSource([32]byte{})
+		p0.Randomize(tc.params.RingQ(), tc.params.RingP(), source)
+		p1.Randomize(tc.params.RingQ(), tc.params.RingP(), source)
+		buffer.RequireSerializerCorrect(t, &RefreshShare{EncToShareShare: p0, ShareToEncShare: p1, MetaData: rlwe.MetaData{IsNTT: true}})
 	})
 }

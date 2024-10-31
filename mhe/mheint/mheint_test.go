@@ -5,17 +5,20 @@ import (
 	"flag"
 	"fmt"
 	"math"
+
+	"math/rand/v2"
 	"runtime"
+	"slices"
 	"testing"
 
+	"github.com/Pro7ech/lattigo/he/heint"
+	"github.com/Pro7ech/lattigo/mhe"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+
+	"github.com/Pro7ech/lattigo/utils/sampling"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/heint"
-	"github.com/tuneinsight/lattigo/v5/mhe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
 )
 
 var flagParamString = flag.String("params", "", "specify the test cryptographic parameters as a JSON string. Overrides -short and -long.")
@@ -28,7 +31,7 @@ func GetTestName(opname string, p heint.Parameters, parties int) string {
 		int(math.Round(p.LogP())),
 		p.LogMaxDimensions().Rows,
 		p.LogMaxDimensions().Cols,
-		int(math.Round(p.LogT())),
+		int(math.Round(p.LogPlaintextModulus())),
 		p.QCount(),
 		p.PCount(),
 		parties)
@@ -44,28 +47,15 @@ type testContext struct {
 	n int
 
 	// Polynomial contexts
-	ringT *ring.Ring
-	ringQ *ring.Ring
-	ringP *ring.Ring
+	rT *ring.Ring
 
 	encoder *heint.Encoder
 
-	sk0Shards []*rlwe.SecretKey
-	sk0       *rlwe.SecretKey
+	skShares []*rlwe.SecretKey
 
-	sk1       *rlwe.SecretKey
-	sk1Shards []*rlwe.SecretKey
-
-	pk0 *rlwe.PublicKey
-	pk1 *rlwe.PublicKey
-
-	encryptorPk0 *rlwe.Encryptor
-	decryptorSk0 *rlwe.Decryptor
-	decryptorSk1 *rlwe.Decryptor
-	evaluator    *heint.Evaluator
-
-	crs            mhe.CRS
-	uniformSampler *ring.UniformSampler
+	encryptor *rlwe.Encryptor
+	decryptor *rlwe.Decryptor
+	evaluator *heint.Evaluator
 }
 
 func TestInteger(t *testing.T) {
@@ -84,9 +74,10 @@ func TestInteger(t *testing.T) {
 
 	for _, p := range paramsLiterals {
 
-		for _, plaintextModulus := range testPlaintextModulus[:] {
+		for _, T := range testPlaintextModulus[:1] {
 
-			p.PlaintextModulus = plaintextModulus
+			p.T = T
+			p.R = 1
 
 			var params heint.Parameters
 			if params, err = heint.NewParametersFromLiteral(p); err != nil {
@@ -122,13 +113,7 @@ func gentestContext(nParties int, params heint.Parameters) (tc *testContext, err
 
 	tc.n = params.N()
 
-	tc.ringT = params.RingT()
-	tc.ringQ = params.RingQ()
-	tc.ringP = params.RingP()
-
-	prng, _ := sampling.NewKeyedPRNG([]byte{'t', 'e', 's', 't'})
-	tc.crs = prng
-	tc.uniformSampler = ring.NewUniformSampler(prng, params.RingQ())
+	tc.rT = params.RT
 
 	tc.encoder = heint.NewEncoder(tc.params)
 	tc.evaluator = heint.NewEvaluator(tc.params, nil)
@@ -136,113 +121,107 @@ func gentestContext(nParties int, params heint.Parameters) (tc *testContext, err
 	kgen := rlwe.NewKeyGenerator(tc.params)
 
 	// SecretKeys
-	tc.sk0Shards = make([]*rlwe.SecretKey, nParties)
-	tc.sk1Shards = make([]*rlwe.SecretKey, nParties)
+	tc.skShares = make([]*rlwe.SecretKey, nParties)
 
-	tc.sk0 = rlwe.NewSecretKey(tc.params.Parameters)
-	tc.sk1 = rlwe.NewSecretKey(tc.params.Parameters)
+	sk := rlwe.NewSecretKey(tc.params.Parameters)
 
-	ringQP := params.RingQP()
+	rQ := params.RingQ()
+	rP := params.RingP()
 	for j := 0; j < nParties; j++ {
-		tc.sk0Shards[j] = kgen.GenSecretKeyNew()
-		tc.sk1Shards[j] = kgen.GenSecretKeyNew()
-		ringQP.Add(tc.sk0.Value, tc.sk0Shards[j].Value, tc.sk0.Value)
-		ringQP.Add(tc.sk1.Value, tc.sk1Shards[j].Value, tc.sk1.Value)
+		tc.skShares[j] = kgen.GenSecretKeyNew()
+		rQ.Add(sk.Q, tc.skShares[j].Q, sk.Q)
+
+		if rP != nil {
+			rP.Add(sk.P, tc.skShares[j].P, sk.P)
+		}
 	}
 
-	// Publickeys
-	tc.pk0 = kgen.GenPublicKeyNew(tc.sk0)
-	tc.pk1 = kgen.GenPublicKeyNew(tc.sk1)
-	tc.encryptorPk0 = rlwe.NewEncryptor(tc.params, tc.pk0)
-	tc.decryptorSk0 = rlwe.NewDecryptor(tc.params, tc.sk0)
-	tc.decryptorSk1 = rlwe.NewDecryptor(tc.params, tc.sk1)
+	tc.encryptor = rlwe.NewEncryptor(tc.params, sk)
+	tc.decryptor = rlwe.NewDecryptor(tc.params, sk)
 
 	return
 }
 
 func testEncToShares(tc *testContext, t *testing.T) {
 
-	coeffs, _, ciphertext := newTestVectors(tc, tc.encryptorPk0, t)
+	coeffs, _, ciphertext := newTestVectors(tc, tc.encryptor, t)
 
 	type Party struct {
 		e2s         EncToShareProtocol
 		s2e         ShareToEncProtocol
 		sk          *rlwe.SecretKey
-		publicShare mhe.KeySwitchShare
-		secretShare mhe.AdditiveShare
+		publicShare *mhe.KeySwitchingShare
+		secretShare *mhe.AdditiveShare
 	}
 
 	params := tc.params
 	P := make([]Party, tc.NParties)
 
-	var err error
 	for i := range P {
 		if i == 0 {
-			P[i].e2s, err = NewEncToShareProtocol(params, params.Xe())
-			require.NoError(t, err)
-			P[i].s2e, err = NewShareToEncProtocol(params, params.Xe())
-			require.NoError(t, err)
+			P[i].e2s = *NewEncToShareProtocol(params)
+			P[i].s2e = *NewShareToEncProtocol(params)
 		} else {
-			P[i].e2s = P[0].e2s.ShallowCopy()
-			P[i].s2e = P[0].s2e.ShallowCopy()
+			P[i].e2s = *P[0].e2s.ShallowCopy()
+			P[i].s2e = *P[0].s2e.ShallowCopy()
 		}
 
-		P[i].sk = tc.sk0Shards[i]
-		P[i].publicShare = P[i].e2s.AllocateShare(ciphertext.Level())
+		P[i].sk = tc.skShares[i]
+		P[i].publicShare = P[i].e2s.Allocate(ciphertext.Level())
 		P[i].secretShare = NewAdditiveShare(params)
 	}
 
 	// The EncToShare protocol is run in all tests, as a setup to the ShareToEnc test.
 	for i, p := range P {
-		p.e2s.GenShare(p.sk, ciphertext, &p.secretShare, &p.publicShare)
+		require.NoError(t, p.e2s.Gen(p.sk, ciphertext, p.secretShare, p.publicShare))
 		if i > 0 {
-			p.e2s.AggregateShares(P[0].publicShare, p.publicShare, &P[0].publicShare)
+			require.NoError(t, p.e2s.Aggregate(P[0].publicShare, p.publicShare, P[0].publicShare))
 		}
 	}
 
-	P[0].e2s.GetShare(&P[0].secretShare, P[0].publicShare, ciphertext, &P[0].secretShare)
+	P[0].e2s.Finalize(P[0].secretShare, P[0].publicShare, ciphertext, P[0].secretShare)
 
 	t.Run(GetTestName("EncToShareProtocol", tc.params, tc.NParties), func(t *testing.T) {
 
 		rec := NewAdditiveShare(params)
 		for _, p := range P {
-			tc.ringT.Add(rec.Value, p.secretShare.Value, rec.Value)
+			tc.rT.Add(rec.Value, p.secretShare.Value, rec.Value)
 		}
 
-		ptRt := tc.params.RingT().NewPoly()
-		ptRt.Copy(rec.Value)
-		values := make([]uint64, len(coeffs))
+		ptRt := make([]uint64, params.MaxSlots())
+		copy(ptRt, rec.Value)
 
+		values := make([]uint64, len(coeffs))
 		tc.encoder.DecodeRingT(ptRt, ciphertext.Scale, values)
 
-		assert.True(t, utils.EqualSlice(coeffs, values))
+		assert.True(t, slices.Equal(coeffs, values))
 	})
-
-	crp := P[0].e2s.SampleCRP(params.MaxLevel(), tc.crs)
 
 	t.Run(GetTestName("ShareToEncProtocol", tc.params, tc.NParties), func(t *testing.T) {
 
+		seed := [32]byte{}
+
 		for i, p := range P {
-			p.s2e.GenShare(p.sk, crp, p.secretShare, &p.publicShare)
+			require.NoError(t, p.s2e.Gen(p.sk, seed, p.secretShare, p.publicShare))
 			if i > 0 {
-				p.s2e.AggregateShares(P[0].publicShare, p.publicShare, &P[0].publicShare)
+				require.NoError(t, p.s2e.Aggregate(P[0].publicShare, p.publicShare, P[0].publicShare))
 			}
 		}
 
 		ctRec := heint.NewCiphertext(tc.params, 1, tc.params.MaxLevel())
 		*ctRec.MetaData = *ciphertext.MetaData
-		P[0].s2e.GetEncryption(P[0].publicShare, crp, ctRec)
+		require.NoError(t, P[0].s2e.Finalize(P[0].publicShare, ctRec))
 
-		verifyTestVectors(tc, tc.decryptorSk0, coeffs, ctRec, t)
+		verifyTestVectors(tc, tc.decryptor, coeffs, ctRec, t)
 	})
 }
 
 func testRefresh(tc *testContext, t *testing.T) {
 
-	encryptorPk0 := tc.encryptorPk0
-	sk0Shards := tc.sk0Shards
+	encryptor := tc.encryptor
+	skShares := tc.skShares
 	encoder := tc.encoder
-	decryptorSk0 := tc.decryptorSk0
+	decryptor := tc.decryptor
 
 	minLevel := 0
 	maxLevel := tc.params.MaxLevel()
@@ -252,57 +231,53 @@ func testRefresh(tc *testContext, t *testing.T) {
 		type Party struct {
 			RefreshProtocol
 			s     *rlwe.SecretKey
-			share mhe.RefreshShare
+			share *mhe.RefreshShare
 		}
 
 		RefreshParties := make([]*Party, tc.NParties)
 		for i := 0; i < tc.NParties; i++ {
 			p := new(Party)
 			if i == 0 {
-				var err error
-				p.RefreshProtocol, err = NewRefreshProtocol(tc.params, tc.params.Xe())
-				require.NoError(t, err)
+				p.RefreshProtocol = *NewRefreshProtocol(tc.params)
 			} else {
-				p.RefreshProtocol = RefreshParties[0].RefreshProtocol.ShallowCopy()
+				p.RefreshProtocol = *RefreshParties[0].RefreshProtocol.ShallowCopy()
 			}
 
-			p.s = sk0Shards[i]
-			p.share = p.AllocateShare(minLevel, maxLevel)
+			p.s = skShares[i]
+			p.share = p.Allocate(minLevel, maxLevel)
 			RefreshParties[i] = p
 		}
 
 		P0 := RefreshParties[0]
 
-		crp := P0.SampleCRP(maxLevel, tc.crs)
+		seed := [32]byte{}
 
-		coeffs, _, ciphertext := newTestVectors(tc, encryptorPk0, t)
-		ciphertext.Resize(ciphertext.Degree(), minLevel)
+		coeffs, _, ciphertext := newTestVectors(tc, encryptor, t)
+		ciphertext.ResizeQ(minLevel)
 
 		for i, p := range RefreshParties {
-			p.GenShare(p.s, ciphertext, crp, &p.share)
+			require.NoError(t, p.Gen(p.s, ciphertext, seed, p.share))
 			if i > 0 {
-				P0.AggregateShares(p.share, P0.share, &P0.share)
+				require.NoError(t, P0.Aggregate(p.share, P0.share, P0.share))
 			}
-
 		}
 
-		P0.Finalize(ciphertext, crp, P0.share, ciphertext)
+		require.NoError(t, P0.Finalize(ciphertext, P0.share, ciphertext))
 
 		//Decrypts and compare
 		require.True(t, ciphertext.Level() == maxLevel)
 		have := make([]uint64, tc.params.MaxSlots())
-		encoder.Decode(decryptorSk0.DecryptNew(ciphertext), have)
-		require.True(t, utils.EqualSlice(coeffs, have))
+		encoder.Decode(decryptor.DecryptNew(ciphertext), have)
+		require.True(t, slices.Equal(coeffs, have))
 	})
 }
 
 func testRefreshAndPermutation(tc *testContext, t *testing.T) {
 
-	encryptorPk0 := tc.encryptorPk0
-	sk0Shards := tc.sk0Shards
+	encryptor := tc.encryptor
+	skShares := tc.skShares
 	encoder := tc.encoder
-	decryptorSk0 := tc.decryptorSk0
-	var err error
+	decryptor := tc.decryptor
 
 	minLevel := 0
 	maxLevel := tc.params.MaxLevel()
@@ -312,39 +287,35 @@ func testRefreshAndPermutation(tc *testContext, t *testing.T) {
 		type Party struct {
 			MaskedTransformProtocol
 			s     *rlwe.SecretKey
-			share mhe.RefreshShare
+			share *mhe.RefreshShare
 		}
 
 		RefreshParties := make([]*Party, tc.NParties)
 		for i := 0; i < tc.NParties; i++ {
 			p := new(Party)
 			if i == 0 {
-				if p.MaskedTransformProtocol, err = NewMaskedTransformProtocol(tc.params, tc.params, tc.params.Xe()); err != nil {
-					t.Fatal(err)
-				}
+				p.MaskedTransformProtocol = *NewMaskedTransformProtocol(tc.params, tc.params)
 			} else {
-				if p.MaskedTransformProtocol, err = NewMaskedTransformProtocol(tc.params, tc.params, tc.params.Xe()); err != nil {
-					t.Fatal(err)
-				}
+				p.MaskedTransformProtocol = *RefreshParties[0].ShallowCopy()
 			}
 
-			p.s = sk0Shards[i]
-			p.share = p.AllocateShare(minLevel, maxLevel)
+			p.s = skShares[i]
+			p.share = p.Allocate(minLevel, maxLevel)
 			RefreshParties[i] = p
 		}
 
 		P0 := RefreshParties[0]
 
-		crp := P0.SampleCRP(maxLevel, tc.crs)
+		seed := [32]byte{}
 
-		coeffs, _, ciphertext := newTestVectors(tc, encryptorPk0, t)
-		ciphertext.Resize(ciphertext.Degree(), minLevel)
+		coeffs, _, ciphertext := newTestVectors(tc, encryptor, t)
+		ciphertext.ResizeQ(minLevel)
 
 		permutation := make([]uint64, len(coeffs))
 		N := uint64(len(coeffs))
-		prng, _ := sampling.NewPRNG()
+		r := rand.New(sampling.NewSource(sampling.NewSeed()))
 		for i := range permutation {
-			permutation[i] = ring.RandUniform(prng, N, N-1)
+			permutation[i] = r.Uint64N(N)
 		}
 
 		permute := func(coeffs []uint64) {
@@ -362,13 +333,13 @@ func testRefreshAndPermutation(tc *testContext, t *testing.T) {
 		}
 
 		for i, p := range RefreshParties {
-			p.GenShare(p.s, p.s, ciphertext, crp, maskedTransform, &p.share)
+			require.NoError(t, p.Gen(p.s, p.s, ciphertext, seed, maskedTransform, p.share))
 			if i > 0 {
-				P0.AggregateShares(P0.share, p.share, &P0.share)
+				require.NoError(t, P0.Aggregate(P0.share, p.share, P0.share))
 			}
 		}
 
-		P0.Transform(ciphertext, maskedTransform, crp, P0.share, ciphertext)
+		require.NoError(t, P0.Finalize(ciphertext, maskedTransform, P0.share, ciphertext))
 
 		coeffsPermute := make([]uint64, len(coeffs))
 		for i := range coeffsPermute {
@@ -376,18 +347,18 @@ func testRefreshAndPermutation(tc *testContext, t *testing.T) {
 		}
 
 		coeffsHave := make([]uint64, tc.params.MaxSlots())
-		encoder.Decode(decryptorSk0.DecryptNew(ciphertext), coeffsHave)
+		encoder.Decode(decryptor.DecryptNew(ciphertext), coeffsHave)
 
 		//Decrypts and compares
 		require.True(t, ciphertext.Level() == maxLevel)
-		require.True(t, utils.EqualSlice(coeffsPermute, coeffsHave))
+		require.True(t, slices.Equal(coeffsPermute, coeffsHave))
 	})
 }
 
 func testRefreshAndTransformSwitchParams(tc *testContext, t *testing.T) {
 
-	encryptorPk0 := tc.encryptorPk0
-	sk0Shards := tc.sk0Shards
+	encryptor := tc.encryptor
+	skShares := tc.skShares
 	paramsIn := tc.params
 
 	t.Run(GetTestName("RefreshAndTransformSwitchparams", tc.params, tc.NParties), func(t *testing.T) {
@@ -395,10 +366,11 @@ func testRefreshAndTransformSwitchParams(tc *testContext, t *testing.T) {
 		var paramsOut heint.Parameters
 		var err error
 		paramsOut, err = heint.NewParametersFromLiteral(heint.ParametersLiteral{
-			LogN:             paramsIn.LogN(),
-			LogQ:             []int{54, 49, 49, 49},
-			LogP:             []int{52, 52},
-			PlaintextModulus: paramsIn.PlaintextModulus(),
+			LogN: paramsIn.LogN(),
+			LogQ: []int{54, 49, 49, 49},
+			LogP: []int{52, 52},
+			T:    paramsIn.BasePlaintextModulus(),
+			R:    paramsIn.BasePlaintextModulusPower(),
 		})
 
 		minLevel := 0
@@ -410,7 +382,7 @@ func testRefreshAndTransformSwitchParams(tc *testContext, t *testing.T) {
 			MaskedTransformProtocol
 			sIn   *rlwe.SecretKey
 			sOut  *rlwe.SecretKey
-			share mhe.RefreshShare
+			share *mhe.RefreshShare
 		}
 
 		RefreshParties := make([]*Party, tc.NParties)
@@ -419,36 +391,32 @@ func testRefreshAndTransformSwitchParams(tc *testContext, t *testing.T) {
 		for i := 0; i < tc.NParties; i++ {
 			p := new(Party)
 			if i == 0 {
-				if p.MaskedTransformProtocol, err = NewMaskedTransformProtocol(paramsIn, paramsOut, paramsIn.Xe()); err != nil {
-					t.Fatal(err)
-				}
+				p.MaskedTransformProtocol = *NewMaskedTransformProtocol(paramsIn, paramsOut)
 			} else {
-				if p.MaskedTransformProtocol, err = NewMaskedTransformProtocol(paramsIn, paramsOut, paramsIn.Xe()); err != nil {
-					t.Fatal(err)
-				}
+				p.MaskedTransformProtocol = *RefreshParties[0].ShallowCopy()
 			}
 
-			p.sIn = sk0Shards[i]
+			p.sIn = skShares[i]
 
 			p.sOut = kgenParamsOut.GenSecretKeyNew() // New shared secret key in target parameters
-			paramsOut.RingQ().Add(skIdealOut.Value.Q, p.sOut.Value.Q, skIdealOut.Value.Q)
+			paramsOut.RingQ().Add(skIdealOut.Q, p.sOut.Q, skIdealOut.Q)
 
-			p.share = p.AllocateShare(minLevel, maxLevel)
+			p.share = p.Allocate(minLevel, maxLevel)
 
 			RefreshParties[i] = p
 		}
 
 		P0 := RefreshParties[0]
 
-		crp := P0.SampleCRP(paramsOut.MaxLevel(), tc.crs)
+		seed := [32]byte{}
 
-		coeffs, _, ciphertext := newTestVectors(tc, encryptorPk0, t)
+		coeffs, _, ciphertext := newTestVectors(tc, encryptor, t)
 
 		permutation := make([]uint64, len(coeffs))
 		N := uint64(len(coeffs))
-		prng, _ := sampling.NewPRNG()
+		r := rand.New(sampling.NewSource(sampling.NewSeed()))
 		for i := range permutation {
-			permutation[i] = ring.RandUniform(prng, N, N-1)
+			permutation[i] = r.Uint64N(N)
 		}
 
 		transform := &MaskedTransformFunc{
@@ -464,13 +432,13 @@ func testRefreshAndTransformSwitchParams(tc *testContext, t *testing.T) {
 		}
 
 		for i, p := range RefreshParties {
-			p.GenShare(p.sIn, p.sOut, ciphertext, crp, transform, &p.share)
+			require.NoError(t, p.Gen(p.sIn, p.sOut, ciphertext, seed, transform, p.share))
 			if i > 0 {
-				P0.AggregateShares(P0.share, p.share, &P0.share)
+				require.NoError(t, P0.Aggregate(P0.share, p.share, P0.share))
 			}
 		}
 
-		P0.Transform(ciphertext, transform, crp, P0.share, ciphertext)
+		require.NoError(t, P0.Finalize(ciphertext, transform, P0.share, ciphertext))
 
 		transform.Func(coeffs)
 
@@ -480,33 +448,31 @@ func testRefreshAndTransformSwitchParams(tc *testContext, t *testing.T) {
 
 		//Decrypts and compares
 		require.True(t, ciphertext.Level() == maxLevel)
-		require.True(t, utils.EqualSlice(coeffs, coeffsHave))
+		require.True(t, slices.Equal(coeffs, coeffsHave))
 	})
 }
 
 func newTestVectors(tc *testContext, encryptor *rlwe.Encryptor, t *testing.T) (coeffs []uint64, plaintext *rlwe.Plaintext, ciphertext *rlwe.Ciphertext) {
 
-	prng, err := sampling.NewPRNG()
-	require.NoError(t, err)
-	uniformSampler := ring.NewUniformSampler(prng, tc.ringT)
-	coeffsPol := uniformSampler.ReadNew()
-
-	for i := range coeffsPol.Coeffs[0] {
-		coeffsPol.Coeffs[0][i] = uint64(1)
+	coeffs = make([]uint64, tc.params.MaxSlots())
+	for i := range coeffs {
+		coeffs[i] = uint64(i)
 	}
+
+	var err error
 
 	plaintext = heint.NewPlaintext(tc.params, tc.params.MaxLevel())
 	plaintext.Scale = tc.params.NewScale(2)
-	require.NoError(t, tc.encoder.Encode(coeffsPol.Coeffs[0], plaintext))
-	ciphertext, err = encryptor.EncryptNew(plaintext)
-	if err != nil {
+	require.NoError(t, tc.encoder.Encode(coeffs, plaintext))
+	ciphertext = heint.NewCiphertext(tc.params, 1, plaintext.Level())
+	if encryptor.Encrypt(plaintext, ciphertext); err != nil {
 		panic(err)
 	}
-	return coeffsPol.Coeffs[0], plaintext, ciphertext
+	return coeffs, plaintext, ciphertext
 }
 
 func verifyTestVectors(tc *testContext, decryptor *rlwe.Decryptor, coeffs []uint64, ciphertext *rlwe.Ciphertext, t *testing.T) {
 	have := make([]uint64, tc.params.MaxSlots())
 	tc.encoder.Decode(decryptor.DecryptNew(ciphertext), have)
-	require.True(t, utils.EqualSlice(coeffs, have))
+	require.True(t, slices.Equal(coeffs, have))
 }

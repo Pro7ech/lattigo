@@ -3,15 +3,16 @@ package hefloat
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
+	"slices"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/schemes/ckks"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/he"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // EvaluatorForDFT is an interface defining the set of methods required to instantiate a DFTEvaluator.
@@ -61,7 +62,7 @@ const (
 // used to homomorphically encode and decode a ciphertext respectively.
 type DFTMatrix struct {
 	DFTMatrixLiteral
-	Matrices []LinearTransformation
+	Matrices []*he.LinearTransformation
 }
 
 // DFTMatrixLiteral is a struct storing the parameters to generate the factorized DFT/IDFT matrices.
@@ -70,25 +71,24 @@ type DFTMatrix struct {
 // Mandatory:
 //   - Type: HomomorphicEncode (a.k.a. CoeffsToSlots) or HomomorphicDecode (a.k.a. SlotsToCoeffs)
 //   - LogSlots: log2(slots)
-//   - LevelStart: starting level of the linear transformation
+//   - LevelQ: starting level of the linear transformation
 //   - Levels: depth of the linear transform (i.e. the degree of factorization of the encoding matrix)
 //
 // Optional:
 //   - Format: which post-processing (if any) to apply to the DFT.
 //   - Scaling: constant by which the matrix is multiplied
 //   - BitReversed: if true, then applies the transformation bit-reversed and expects bit-reversed inputs
-//   - LogBSGSRatio: log2 of the ratio between the inner and outer loop of the baby-step giant-step algorithm
 type DFTMatrixLiteral struct {
 	// Mandatory
-	Type       DFTType
-	LogSlots   int
-	LevelStart int
-	Levels     []int
+	Type     DFTType
+	LogSlots int
+	LevelQ   int
+	LevelP   int
+	Levels   []int
 	// Optional
-	Format       DFTFormat  // Default: standard.
-	Scaling      *big.Float // Default 1.0.
-	BitReversed  bool       // Default: False.
-	LogBSGSRatio int        // Default: 0.
+	Format      DFTFormat  // Default: standard.
+	Scaling     *big.Float // Default 1.0.
+	BitReversed bool       // Default: False.
 }
 
 // Depth returns the number of levels allocated to the linear transform.
@@ -107,6 +107,11 @@ func (d DFTMatrixLiteral) Depth(actual bool) (depth int) {
 
 // GaloisElements returns the list of rotations performed during the CoeffsToSlot operation.
 func (d DFTMatrixLiteral) GaloisElements(params Parameters) (galEls []uint64) {
+
+	if d.LogSlots < d.Depth(false) {
+		panic(fmt.Errorf("invalid DFTMatrixLiteral: LogSlots=%d < factorization depth=%v", d.LogSlots, d.Levels))
+	}
+
 	rotations := []int{}
 
 	imgRepack := d.Format == RepackImagAsReal
@@ -126,8 +131,8 @@ func (d DFTMatrixLiteral) GaloisElements(params Parameters) (galEls []uint64) {
 
 	// Coeffs to Slots rotations
 	for i, pVec := range indexCtS {
-		N1 := he.FindBestBSGSRatio(utils.GetKeys(pVec), dslots, d.LogBSGSRatio)
-		rotations = addMatrixRotToList(pVec, rotations, N1, slots, d.Type == HomomorphicDecode && logSlots < logN-1 && i == 0 && imgRepack)
+		GiantStep := he.OptimalLinearTransformationGiantStep(slices.Collect(maps.Keys(pVec)), dslots)
+		rotations = addMatrixRotToList(pVec, rotations, GiantStep, slots, d.Type == HomomorphicDecode && logSlots < logN-1 && i == 0 && imgRepack)
 	}
 
 	return params.GaloisElements(rotations)
@@ -149,7 +154,7 @@ func (d *DFTMatrixLiteral) UnmarshalBinary(data []byte) error {
 // All fields of this struct are public, enabling custom instantiations.
 type DFTEvaluator struct {
 	EvaluatorForDFT
-	*LinearTransformationEvaluator
+	*he.LinearTransformationEvaluator
 	parameters Parameters
 }
 
@@ -158,13 +163,17 @@ type DFTEvaluator struct {
 func NewDFTEvaluator(params Parameters, eval EvaluatorForDFT) *DFTEvaluator {
 	dfteval := new(DFTEvaluator)
 	dfteval.EvaluatorForDFT = eval
-	dfteval.LinearTransformationEvaluator = NewLinearTransformationEvaluator(eval)
+	dfteval.LinearTransformationEvaluator = he.NewLinearTransformationEvaluator(eval)
 	dfteval.parameters = params
 	return dfteval
 }
 
 // NewDFTMatrixFromLiteral generates the factorized DFT/IDFT matrices for the homomorphic encoding/decoding.
-func NewDFTMatrixFromLiteral(params Parameters, d DFTMatrixLiteral, encoder *Encoder) (DFTMatrix, error) {
+func NewDFTMatrixFromLiteral(params Parameters, d DFTMatrixLiteral, encoder *Encoder) (*DFTMatrix, error) {
+
+	if d.LogSlots < d.Depth(false) {
+		return nil, fmt.Errorf("invalid DFTMatrixLiteral: LogSlots=%d < factorization depth=%v", d.LogSlots, d.Levels)
+	}
 
 	logSlots := d.LogSlots
 	logdSlots := logSlots
@@ -173,19 +182,19 @@ func NewDFTMatrixFromLiteral(params Parameters, d DFTMatrixLiteral, encoder *Enc
 	}
 
 	// CoeffsToSlots vectors
-	matrices := []LinearTransformation{}
+	matrices := []*he.LinearTransformation{}
 	pVecDFT := d.GenMatrices(params.LogN(), params.EncodingPrecision())
 
 	nbModuliPerRescale := params.LevelsConsumedPerRescaling()
 
-	level := d.LevelStart
+	LevelQ := d.LevelQ
 	var idx int
 	for i := range d.Levels {
 
-		scale := rlwe.NewScale(params.Q()[level])
+		scale := rlwe.NewScale(params.Q()[LevelQ])
 
 		for j := 1; j < nbModuliPerRescale; j++ {
-			scale = scale.Mul(rlwe.NewScale(params.Q()[level-j]))
+			scale = scale.Mul(rlwe.NewScale(params.Q()[LevelQ-j]))
 		}
 
 		if d.Levels[i] > 1 {
@@ -197,28 +206,28 @@ func NewDFTMatrixFromLiteral(params Parameters, d DFTMatrixLiteral, encoder *Enc
 
 		for j := 0; j < d.Levels[i]; j++ {
 
-			ltparams := LinearTransformationParameters{
-				DiagonalsIndexList:       pVecDFT[idx].DiagonalsIndexList(),
-				Level:                    level,
-				Scale:                    scale,
-				LogDimensions:            ring.Dimensions{Rows: 0, Cols: logdSlots},
-				LogBabyStepGianStepRatio: d.LogBSGSRatio,
+			ltparams := he.LinearTransformationParameters{
+				Indexes:       pVecDFT[idx].Indexes(),
+				LevelQ:        LevelQ,
+				LevelP:        d.LevelP,
+				Scale:         scale,
+				LogDimensions: ring.Dimensions{Rows: 0, Cols: logdSlots},
 			}
 
-			mat := NewLinearTransformation(params, ltparams)
+			mat := he.NewLinearTransformation(params, ltparams)
 
-			if err := EncodeLinearTransformation[*bignum.Complex](encoder, pVecDFT[idx], mat); err != nil {
-				return DFTMatrix{}, fmt.Errorf("cannot NewDFTMatrixFromLiteral: %w", err)
+			if err := he.EncodeLinearTransformation[bignum.Complex](encoder, pVecDFT[idx], mat); err != nil {
+				return nil, fmt.Errorf("cannot NewDFTMatrixFromLiteral: %w", err)
 			}
 
 			matrices = append(matrices, mat)
 			idx++
 		}
 
-		level -= nbModuliPerRescale
+		LevelQ -= nbModuliPerRescale
 	}
 
-	return DFTMatrix{DFTMatrixLiteral: d, Matrices: matrices}, nil
+	return &DFTMatrix{DFTMatrixLiteral: d, Matrices: matrices}, nil
 }
 
 // CoeffsToSlotsNew applies the homomorphic encoding and returns the result on new ciphertexts.
@@ -226,39 +235,39 @@ func NewDFTMatrixFromLiteral(params Parameters, d DFTMatrixLiteral, encoder *Enc
 // Given n = current number of slots and N/2 max number of slots (half the ring degree):
 // If the packing is sparse (n < N/2), then returns ctReal = Ecd(vReal || vImag) and ctImag = nil.
 // If the packing is dense (n == N/2), then returns ctReal = Ecd(vReal) and ctImag = Ecd(vImag).
-func (eval *DFTEvaluator) CoeffsToSlotsNew(ctIn *rlwe.Ciphertext, ctsMatrices DFTMatrix) (ctReal, ctImag *rlwe.Ciphertext, err error) {
-	ctReal = NewCiphertext(eval.parameters, 1, ctsMatrices.LevelStart)
+func (eval *DFTEvaluator) CoeffsToSlotsNew(ctIn *rlwe.Ciphertext, ctsMatrices *DFTMatrix, buf rlwe.HoistingBuffer) (ctReal, ctImag *rlwe.Ciphertext, err error) {
+	ctReal = NewCiphertext(eval.parameters, 1, ctsMatrices.LevelQ)
 
 	if ctsMatrices.LogSlots == eval.parameters.LogMaxSlots() {
-		ctImag = NewCiphertext(eval.parameters, 1, ctsMatrices.LevelStart)
+		ctImag = NewCiphertext(eval.parameters, 1, ctsMatrices.LevelQ)
 	}
 
-	return ctReal, ctImag, eval.CoeffsToSlots(ctIn, ctsMatrices, ctReal, ctImag)
+	return ctReal, ctImag, eval.CoeffsToSlots(ctIn, ctsMatrices, buf, ctReal, ctImag)
 }
 
 // CoeffsToSlots applies the homomorphic encoding and returns the results on the provided ciphertexts.
 // Homomorphically encodes a complex vector vReal + i*vImag of size n on a real vector of size 2n.
 // If the packing is sparse (n < N/2), then returns ctReal = Ecd(vReal || vImag) and ctImag = nil.
 // If the packing is dense (n == N/2), then returns ctReal = Ecd(vReal) and ctImag = Ecd(vImag).
-func (eval *DFTEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, ctsMatrices DFTMatrix, ctReal, ctImag *rlwe.Ciphertext) (err error) {
+func (eval *DFTEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, ctsMatrices *DFTMatrix, buf rlwe.HoistingBuffer, ctReal, ctImag *rlwe.Ciphertext) (err error) {
 
 	if ctsMatrices.Format == RepackImagAsReal || ctsMatrices.Format == SplitRealAndImag {
 
-		zV := ctIn.CopyNew()
+		zV := ctIn.Clone()
 
-		if err = eval.dft(ctIn, ctsMatrices.Matrices, zV); err != nil {
-			return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+		if err = eval.Evaluate(ctIn, ctsMatrices, buf, zV); err != nil {
+			return fmt.Errorf("eval.dft: %w", err)
 		}
 
 		if err = eval.Conjugate(zV, ctReal); err != nil {
-			return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+			return fmt.Errorf("eval.Conjugate: %w", err)
 		}
 
 		var tmp *rlwe.Ciphertext
 		if ctImag != nil {
 			tmp = ctImag
 		} else {
-			tmp, err = rlwe.NewCiphertextAtLevelFromPoly(ctReal.Level(), eval.GetBuffCt().Value[:2])
+			tmp, err = rlwe.NewCiphertextAtLevelFromPoly(ctReal.Level(), -1, eval.GetBuffCt().Q[:2], nil)
 
 			// This error cannot happen unless the user improperly tempered the evaluators
 			// buffer. If it were to happen in that case, there is no way to recover from
@@ -272,34 +281,34 @@ func (eval *DFTEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, ctsMatrices DFTMa
 
 		// Imag part
 		if err = eval.Sub(zV, ctReal, tmp); err != nil {
-			return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+			return fmt.Errorf("eval.Sub: %w", err)
 		}
 
 		if err = eval.Mul(tmp, -1i, tmp); err != nil {
-			return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+			return fmt.Errorf("eval.Mul: %w", err)
 		}
 
 		// Real part
 		if err = eval.Add(ctReal, zV, ctReal); err != nil {
-			return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+			return fmt.Errorf("eval.Add: %w", err)
 		}
 
 		// If repacking, then ct0 and ct1 right n/2 slots are zero.
 		if ctsMatrices.Format == RepackImagAsReal && ctsMatrices.LogSlots < eval.parameters.LogMaxSlots() {
 			if err = eval.Rotate(tmp, 1<<ctIn.LogDimensions.Cols, tmp); err != nil {
-				return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+				return fmt.Errorf("eval.Rotate: %w", err)
 			}
 
 			if err = eval.Add(ctReal, tmp, ctReal); err != nil {
-				return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+				return fmt.Errorf("eval.Add: %w", err)
 			}
 		}
 
 		zV = nil
 
 	} else {
-		if err = eval.dft(ctIn, ctsMatrices.Matrices, ctReal); err != nil {
-			return fmt.Errorf("cannot CoeffsToSlots: %w", err)
+		if err = eval.Evaluate(ctIn, ctsMatrices, buf, ctReal); err != nil {
+			return fmt.Errorf("eval.Evaluate: %w", err)
 		}
 	}
 
@@ -310,14 +319,14 @@ func (eval *DFTEvaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext, ctsMatrices DFTMa
 // Homomorphically decodes a real vector of size 2n on a complex vector vReal + i*vImag of size n.
 // If the packing is sparse (n < N/2) then ctReal = Ecd(vReal || vImag) and ctImag = nil.
 // If the packing is dense (n == N/2), then ctReal = Ecd(vReal) and ctImag = Ecd(vImag).
-func (eval *DFTEvaluator) SlotsToCoeffsNew(ctReal, ctImag *rlwe.Ciphertext, stcMatrices DFTMatrix) (opOut *rlwe.Ciphertext, err error) {
+func (eval *DFTEvaluator) SlotsToCoeffsNew(ctReal, ctImag *rlwe.Ciphertext, stcMatrices *DFTMatrix, buf rlwe.HoistingBuffer) (opOut *rlwe.Ciphertext, err error) {
 
-	if ctReal.Level() < stcMatrices.LevelStart || (ctImag != nil && ctImag.Level() < stcMatrices.LevelStart) {
-		return nil, fmt.Errorf("ctReal.Level() or ctImag.Level() < DFTMatrix.LevelStart")
+	if ctReal.Level() < stcMatrices.LevelQ || (ctImag != nil && ctImag.Level() < stcMatrices.LevelQ) {
+		return nil, fmt.Errorf("ctReal.Level() or ctImag.Level() < DFTMatrix.LevelQ")
 	}
 
-	opOut = NewCiphertext(eval.parameters, 1, stcMatrices.LevelStart)
-	return opOut, eval.SlotsToCoeffs(ctReal, ctImag, stcMatrices, opOut)
+	opOut = NewCiphertext(eval.parameters, 1, stcMatrices.LevelQ)
+	return opOut, eval.SlotsToCoeffs(ctReal, ctImag, stcMatrices, buf, opOut)
 
 }
 
@@ -325,38 +334,56 @@ func (eval *DFTEvaluator) SlotsToCoeffsNew(ctReal, ctImag *rlwe.Ciphertext, stcM
 // Homomorphically decodes a real vector of size 2n on a complex vector vReal + i*vImag of size n.
 // If the packing is sparse (n < N/2) then ctReal = Ecd(vReal || vImag) and ctImag = nil.
 // If the packing is dense (n == N/2), then ctReal = Ecd(vReal) and ctImag = Ecd(vImag).
-func (eval *DFTEvaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext, stcMatrices DFTMatrix, opOut *rlwe.Ciphertext) (err error) {
+func (eval *DFTEvaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext, stcMatrices *DFTMatrix, buf rlwe.HoistingBuffer, opOut *rlwe.Ciphertext) (err error) {
 	// If full packing, the repacking can be done directly using ct0 and ct1.
 	if ctImag != nil {
 
 		if err = eval.Mul(ctImag, 1i, opOut); err != nil {
-			return fmt.Errorf("cannot SlotsToCoeffs: %w", err)
+			return fmt.Errorf("eval.Mul: %w", err)
 		}
 
 		if err = eval.Add(opOut, ctReal, opOut); err != nil {
-			return fmt.Errorf("cannot SlotsToCoeffs: %w", err)
+			return fmt.Errorf("eval.Add: %w", err)
 		}
 
-		if err = eval.dft(opOut, stcMatrices.Matrices, opOut); err != nil {
-			return fmt.Errorf("cannot SlotsToCoeffs: %w", err)
+		if err = eval.Evaluate(opOut, stcMatrices, buf, opOut); err != nil {
+			return fmt.Errorf("eval.Evaluate: %w", err)
 		}
 	} else {
-		if err = eval.dft(ctReal, stcMatrices.Matrices, opOut); err != nil {
-			return fmt.Errorf("cannot SlotsToCoeffs: %w", err)
+		if err = eval.Evaluate(ctReal, stcMatrices, buf, opOut); err != nil {
+			return fmt.Errorf("eval.Evaluate: %w", err)
 		}
 	}
 
 	return
 }
 
-// dft evaluates a series of LinearTransformation sequentially on the ctIn and stores the result in opOut.
-func (eval *DFTEvaluator) dft(ctIn *rlwe.Ciphertext, matrices []LinearTransformation, opOut *rlwe.Ciphertext) (err error) {
+// Evaluate evaluates the homomorphic DFT/IDFT.
+func (eval *DFTEvaluator) Evaluate(ctIn *rlwe.Ciphertext, dft *DFTMatrix, buf rlwe.HoistingBuffer, opOut *rlwe.Ciphertext) (err error) {
 
 	inputLogSlots := ctIn.LogDimensions
 
+	var idx int
+
 	// Sequentially multiplies w with the provided dft matrices.
-	if err = eval.LinearTransformationEvaluator.EvaluateSequential(ctIn, matrices, opOut); err != nil {
-		return
+	for _, Levels := range dft.Levels {
+		for range Levels {
+			if idx == 0 {
+				if err = eval.LinearTransformationEvaluator.Evaluate(ctIn, dft.Matrices[idx], buf, opOut); err != nil {
+					return fmt.Errorf("eval.LinearTransformationEvaluator.Evaluate: %w", err)
+				}
+			} else {
+				if err = eval.LinearTransformationEvaluator.Evaluate(opOut, dft.Matrices[idx], buf, opOut); err != nil {
+					return fmt.Errorf("eval.LinearTransformationEvaluator.Evaluate: %w", err)
+				}
+			}
+
+			idx++
+		}
+
+		if err = eval.Rescale(opOut, opOut); err != nil {
+			return fmt.Errorf("eval.Rescale: %w", err)
+		}
 	}
 
 	// Encoding matrices are a special case of `fractal` linear transform
@@ -367,15 +394,15 @@ func (eval *DFTEvaluator) dft(ctIn *rlwe.Ciphertext, matrices []LinearTransforma
 	return
 }
 
-func fftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, c [][]*bignum.Complex) {
+func fftPlainVec(logN, dslots int, roots []bignum.Complex, pow5 []int) (a, b, c [][]bignum.Complex) {
 
 	var N, m, index, tt, gap, k, mask, idx1, idx2 int
 
 	N = 1 << logN
 
-	a = make([][]*bignum.Complex, logN)
-	b = make([][]*bignum.Complex, logN)
-	c = make([][]*bignum.Complex, logN)
+	a = make([][]bignum.Complex, logN)
+	b = make([][]bignum.Complex, logN)
+	c = make([][]bignum.Complex, logN)
 
 	var size int
 	if 2*N == dslots {
@@ -389,14 +416,14 @@ func fftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, c
 	index = 0
 	for m = 2; m <= N; m <<= 1 {
 
-		aM := make([]*bignum.Complex, dslots)
-		bM := make([]*bignum.Complex, dslots)
-		cM := make([]*bignum.Complex, dslots)
+		aM := make([]bignum.Complex, dslots)
+		bM := make([]bignum.Complex, dslots)
+		cM := make([]bignum.Complex, dslots)
 
-		for i := 0; i < dslots; i++ {
-			aM[i] = bignum.NewComplex().SetPrec(prec)
-			bM[i] = bignum.NewComplex().SetPrec(prec)
-			cM[i] = bignum.NewComplex().SetPrec(prec)
+		for i := range dslots {
+			aM[i].SetPrec(prec)
+			bM[i].SetPrec(prec)
+			cM[i].SetPrec(prec)
 		}
 
 		tt = m >> 1
@@ -414,10 +441,10 @@ func fftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, c
 				idx2 = i + j + tt
 
 				for u := 0; u < size; u++ {
-					aM[idx1+u*N].Set(roots[0])
-					aM[idx2+u*N].Neg(roots[k])
-					bM[idx1+u*N].Set(roots[k])
-					cM[idx2+u*N].Set(roots[0])
+					aM[idx1+u*N].Set(&roots[0])
+					aM[idx2+u*N].Neg(&roots[k])
+					bM[idx1+u*N].Set(&roots[k])
+					cM[idx2+u*N].Set(&roots[0])
 				}
 			}
 		}
@@ -432,15 +459,15 @@ func fftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, c
 	return
 }
 
-func ifftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, c [][]*bignum.Complex) {
+func ifftPlainVec(logN, dslots int, roots []bignum.Complex, pow5 []int) (a, b, c [][]bignum.Complex) {
 
 	var N, m, index, tt, gap, k, mask, idx1, idx2 int
 
 	N = 1 << logN
 
-	a = make([][]*bignum.Complex, logN)
-	b = make([][]*bignum.Complex, logN)
-	c = make([][]*bignum.Complex, logN)
+	a = make([][]bignum.Complex, logN)
+	b = make([][]bignum.Complex, logN)
+	c = make([][]bignum.Complex, logN)
 
 	var size int
 	if 2*N == dslots {
@@ -454,14 +481,14 @@ func ifftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, 
 	index = 0
 	for m = N; m >= 2; m >>= 1 {
 
-		aM := make([]*bignum.Complex, dslots)
-		bM := make([]*bignum.Complex, dslots)
-		cM := make([]*bignum.Complex, dslots)
+		aM := make([]bignum.Complex, dslots)
+		bM := make([]bignum.Complex, dslots)
+		cM := make([]bignum.Complex, dslots)
 
-		for i := 0; i < dslots; i++ {
-			aM[i] = bignum.NewComplex().SetPrec(prec)
-			bM[i] = bignum.NewComplex().SetPrec(prec)
-			cM[i] = bignum.NewComplex().SetPrec(prec)
+		for i := range dslots {
+			aM[i].SetPrec(prec)
+			bM[i].SetPrec(prec)
+			cM[i].SetPrec(prec)
 		}
 
 		tt = m >> 1
@@ -479,10 +506,10 @@ func ifftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, 
 				idx2 = i + j + tt
 
 				for u := 0; u < size; u++ {
-					aM[idx1+u*N].Set(roots[0])
-					aM[idx2+u*N].Neg(roots[k])
-					bM[idx1+u*N].Set(roots[0])
-					cM[idx2+u*N].Set(roots[k])
+					aM[idx1+u*N].Set(&roots[0])
+					aM[idx2+u*N].Neg(&roots[k])
+					bM[idx1+u*N].Set(&roots[0])
+					cM[idx2+u*N].Set(&roots[k])
 				}
 			}
 		}
@@ -499,11 +526,11 @@ func ifftPlainVec(logN, dslots int, roots []*bignum.Complex, pow5 []int) (a, b, 
 
 func addMatrixRotToList(pVec map[int]bool, rotations []int, N1, slots int, repack bool) []int {
 
+	m := map[int]bool{}
+
 	if len(pVec) < 3 {
 		for j := range pVec {
-			if !utils.IsInSlice(j, rotations) {
-				rotations = append(rotations, j)
-			}
+			m[j] = true
 		}
 	} else {
 		var index int
@@ -519,19 +546,14 @@ func addMatrixRotToList(pVec map[int]bool, rotations []int, N1, slots int, repac
 				index &= (slots - 1)
 			}
 
-			if index != 0 && !utils.IsInSlice(index, rotations) {
-				rotations = append(rotations, index)
-			}
-
-			index = j & (N1 - 1)
-
-			if index != 0 && !utils.IsInSlice(index, rotations) {
-				rotations = append(rotations, index)
-			}
+			m[index] = true
+			m[j%N1] = true
 		}
 	}
 
-	return rotations
+	delete(m, 0)
+
+	return append(rotations, slices.Sorted(maps.Keys(m))...)
 }
 
 func (d DFTMatrixLiteral) computeBootstrappingDFTIndexMap(logN int) (rotationMap []map[int]bool) {
@@ -650,7 +672,7 @@ func nextLevelfftIndexMap(vec map[int]bool, logL, N, nextLevel int, ltType DFTTy
 }
 
 // GenMatrices returns the ordered list of factors of the non-zero diagonals of the IDFT (encoding) or DFT (decoding) matrix.
-func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []Diagonals[*bignum.Complex]) {
+func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []he.Diagonals[bignum.Complex]) {
 
 	logSlots := d.LogSlots
 	slots := 1 << logSlots
@@ -664,7 +686,7 @@ func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []Diagon
 		logdSlots++
 	}
 
-	roots := ckks.GetRootsBigComplex(slots<<2, prec)
+	roots := GetRootsBigComplex(slots<<2, prec)
 	pow5 := make([]int, (slots<<1)+1)
 	pow5[0] = 1
 	for i := 1; i < (slots<<1)+1; i++ {
@@ -676,14 +698,14 @@ func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []Diagon
 
 	fftLevel = logSlots
 
-	var a, b, c [][]*bignum.Complex
+	var a, b, c [][]bignum.Complex
 	if ltType == HomomorphicEncode {
 		a, b, c = ifftPlainVec(logSlots, 1<<logdSlots, roots, pow5)
 	} else {
 		a, b, c = fftPlainVec(logSlots, 1<<logdSlots, roots, pow5)
 	}
 
-	plainVector = make([]Diagonals[*bignum.Complex], maxDepth)
+	plainVector = make([]he.Diagonals[bignum.Complex], maxDepth)
 
 	// We compute the chain of merge in order or reverse order depending if its DFT or InvDFT because
 	// the way the levels are collapsed has an impact on the total number of rotations and keys to be
@@ -742,7 +764,8 @@ func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []Diagon
 		for j := range plainVector[maxDepth-1] {
 			v := plainVector[maxDepth-1][j]
 			for x := 0; x < slots; x++ {
-				v[x+slots] = bignum.NewComplex().SetPrec(prec)
+				v[x+slots][0].SetUint64(0)
+				v[x+slots][1].SetUint64(0)
 			}
 		}
 	}
@@ -771,8 +794,8 @@ func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []Diagon
 		for x := range plainVector[j] {
 			v := plainVector[j][x]
 			for i := range v {
-				v[i][0].Mul(v[i][0], scaling)
-				v[i][1].Mul(v[i][1], scaling)
+				v[i][0].Mul(&v[i][0], scaling)
+				v[i][1].Mul(&v[i][1], scaling)
 			}
 		}
 	}
@@ -780,7 +803,7 @@ func (d DFTMatrixLiteral) GenMatrices(LogN int, prec uint) (plainVector []Diagon
 	return
 }
 
-func genFFTDiagMatrix(logL, fftLevel int, a, b, c []*bignum.Complex, ltType DFTType, bitreversed bool) (vectors map[int][]*bignum.Complex) {
+func genFFTDiagMatrix(logL, fftLevel int, a, b, c []bignum.Complex, ltType DFTType, bitreversed bool) (vectors map[int][]bignum.Complex) {
 
 	var rot int
 
@@ -790,7 +813,7 @@ func genFFTDiagMatrix(logL, fftLevel int, a, b, c []*bignum.Complex, ltType DFTT
 		rot = 1 << (logL - fftLevel)
 	}
 
-	vectors = make(map[int][]*bignum.Complex)
+	vectors = make(map[int][]bignum.Complex)
 
 	if bitreversed {
 		utils.BitReverseInPlaceSlice(a, 1<<logL)
@@ -811,22 +834,22 @@ func genFFTDiagMatrix(logL, fftLevel int, a, b, c []*bignum.Complex, ltType DFTT
 	return
 }
 
-func genRepackMatrix(logL int, prec uint, bitreversed bool) (vectors map[int][]*bignum.Complex) {
+func genRepackMatrix(logL int, prec uint, bitreversed bool) (vectors map[int][]bignum.Complex) {
 
-	vectors = make(map[int][]*bignum.Complex)
+	vectors = make(map[int][]bignum.Complex)
 
-	a := make([]*bignum.Complex, 2<<logL)
-	b := make([]*bignum.Complex, 2<<logL)
+	a := make([]bignum.Complex, 2<<logL)
+	b := make([]bignum.Complex, 2<<logL)
 
 	for i := 0; i < 1<<logL; i++ {
-		a[i] = bignum.NewComplex().SetPrec(prec)
+		a[i].SetPrec(prec)
 		a[i][0].SetFloat64(1)
-		a[i+(1<<logL)] = bignum.NewComplex().SetPrec(prec)
+		a[i+(1<<logL)].SetPrec(prec)
 		a[i+(1<<logL)][1].SetFloat64(1)
 
-		b[i] = bignum.NewComplex().SetPrec(prec)
+		b[i].SetPrec(prec)
 		b[i][1].SetFloat64(1)
-		b[i+(1<<logL)] = bignum.NewComplex().SetPrec(prec)
+		b[i+(1<<logL)].SetPrec(prec)
 		b[i+(1<<logL)][0].SetFloat64(1)
 	}
 
@@ -836,11 +859,11 @@ func genRepackMatrix(logL int, prec uint, bitreversed bool) (vectors map[int][]*
 	return
 }
 
-func multiplyFFTMatrixWithNextFFTLevel(vec map[int][]*bignum.Complex, logL, N, nextLevel int, a, b, c []*bignum.Complex, ltType DFTType, bitreversed bool) (newVec map[int][]*bignum.Complex) {
+func multiplyFFTMatrixWithNextFFTLevel(vec map[int][]bignum.Complex, logL, N, nextLevel int, a, b, c []bignum.Complex, ltType DFTType, bitreversed bool) (newVec map[int][]bignum.Complex) {
 
 	var rot int
 
-	newVec = make(map[int][]*bignum.Complex)
+	newVec = make(map[int][]bignum.Complex)
 
 	if ltType == HomomorphicEncode && !bitreversed || ltType == HomomorphicDecode && bitreversed {
 		rot = (1 << (nextLevel - 1)) & (N - 1)
@@ -869,36 +892,36 @@ func multiplyFFTMatrixWithNextFFTLevel(vec map[int][]*bignum.Complex, logL, N, n
 	return
 }
 
-func addToDiagMatrix(diagMat map[int][]*bignum.Complex, index int, vec []*bignum.Complex) {
+func addToDiagMatrix(diagMat map[int][]bignum.Complex, index int, vec []bignum.Complex) {
 	if diagMat[index] == nil {
-		diagMat[index] = make([]*bignum.Complex, len(vec))
+		diagMat[index] = make([]bignum.Complex, len(vec))
 		for i := range vec {
-			diagMat[index][i] = vec[i].Clone()
+			diagMat[index][i].Set(&vec[i])
 		}
 	} else {
 		add(diagMat[index], vec, diagMat[index])
 	}
 }
 
-func rotateAndMulNew(a []*bignum.Complex, k int, b []*bignum.Complex) (c []*bignum.Complex) {
+func rotateAndMulNew(a []bignum.Complex, k int, b []bignum.Complex) (c []bignum.Complex) {
 	multiplier := bignum.NewComplexMultiplier()
 
-	c = make([]*bignum.Complex, len(a))
+	c = make([]bignum.Complex, len(a))
 	for i := range c {
-		c[i] = b[i].Clone()
+		c[i].Set(&b[i])
 	}
 
 	mask := int(len(a) - 1)
 
 	for i := 0; i < len(a); i++ {
-		multiplier.Mul(c[i], a[(i+k)&mask], c[i])
+		multiplier.Mul(&c[i], &a[(i+k)&mask], &c[i])
 	}
 
 	return
 }
 
-func add(a, b, c []*bignum.Complex) {
+func add(a, b, c []bignum.Complex) {
 	for i := 0; i < len(a); i++ {
-		c[i].Add(a[i], b[i])
+		c[i].Add(&a[i], &b[i])
 	}
 }

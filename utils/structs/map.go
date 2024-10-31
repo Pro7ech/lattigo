@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils/buffer"
 	"golang.org/x/exp/constraints"
 )
 
@@ -14,17 +15,17 @@ import (
 // The size of the map is limited to 2^32.
 type Map[K constraints.Integer, T any] map[K]*T
 
-// CopyNew creates a copy of the object.
-func (m Map[K, T]) CopyNew() *Map[K, T] {
+// Clone creates a copy of the object.
+func (m Map[K, T]) Clone() *Map[K, T] {
 
-	if c, isCopiable := any(new(T)).(CopyNewer[T]); !isCopiable {
+	if c, isCopiable := any(new(T)).(Cloner[T]); !isCopiable {
 		panic(fmt.Errorf("vector component of type %T does not comply to %T", new(T), c))
 	}
 
 	var mcpy = make(Map[K, T])
 
 	for key := range m {
-		mcpy[key] = any(m[key]).(CopyNewer[T]).CopyNew()
+		mcpy[key] = any(m[key]).(Cloner[T]).Clone()
 	}
 
 	return &mcpy
@@ -57,7 +58,9 @@ func (m *Map[K, T]) WriteTo(w io.Writer) (n int64, err error) {
 		}
 		n += inc
 
-		for _, key := range utils.GetSortedKeys(*m) {
+		keys := slices.Sorted(maps.Keys(*m))
+
+		for _, key := range keys {
 
 			if inc, err = buffer.WriteUint64(w, uint64(key)); err != nil {
 				return n + inc, err

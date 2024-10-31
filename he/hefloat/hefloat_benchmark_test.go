@@ -6,20 +6,19 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/schemes/ckks"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 )
 
 func GetBenchName(params hefloat.Parameters, opname string) string {
 
 	var PrecisionMod string
 	switch params.PrecisionMode() {
-	case ckks.PREC64:
+	case hefloat.PREC64:
 		PrecisionMod = "PREC64"
-	case ckks.PREC128:
+	case hefloat.PREC128:
 		PrecisionMod = "PREC128"
 	}
 
@@ -123,9 +122,11 @@ func benchEncoder(tc *testContext, b *testing.B) {
 
 		pt := hefloat.NewPlaintext(tc.params, tc.params.MaxLevel())
 
-		values := make([]complex128, 1<<pt.LogDimensions.Cols)
+		r := sampling.NewSource([32]byte{})
+
+		values := make([]complex128, pt.Slots())
 		for i := range values {
-			values[i] = sampling.RandComplex128(-1, 1)
+			values[i] = r.Complex128(-1-1i, 1+1i)
 		}
 
 		b.ResetTimer()
@@ -142,9 +143,11 @@ func benchEncoder(tc *testContext, b *testing.B) {
 
 		pt := hefloat.NewPlaintext(tc.params, tc.params.MaxLevel())
 
-		values := make([]complex128, 1<<pt.LogDimensions.Cols)
+		r := sampling.NewSource([32]byte{})
+
+		values := make([]complex128, pt.Slots())
 		for i := range values {
-			values[i] = sampling.RandComplex128(-1, 1)
+			values[i] = r.Complex128(-1-1i, 1+1i)
 		}
 
 		encoder.Encode(values, pt)
@@ -168,9 +171,11 @@ func benchEncryptor(tc *testContext, b *testing.B) {
 
 		pt := hefloat.NewPlaintext(params, params.MaxLevel())
 
-		values := make([]complex128, 1<<pt.LogDimensions.Cols)
+		r := sampling.NewSource([32]byte{})
+
+		values := make([]complex128, pt.Slots())
 		for i := range values {
-			values[i] = sampling.RandComplex128(-1, 1)
+			values[i] = r.Complex128(-1-1i, 1+1i)
 		}
 
 		if err := tc.encoder.Encode(values, pt); err != nil {
@@ -196,9 +201,11 @@ func benchEncryptor(tc *testContext, b *testing.B) {
 
 		pt := hefloat.NewPlaintext(params, params.MaxLevel())
 
-		values := make([]complex128, 1<<pt.LogDimensions.Cols)
+		r := sampling.NewSource([32]byte{})
+
+		values := make([]complex128, pt.Slots())
 		for i := range values {
-			values[i] = sampling.RandComplex128(-1, 1)
+			values[i] = r.Complex128(-1-1i, 1+1i)
 		}
 
 		if err := tc.encoder.Encode(values, pt); err != nil {
@@ -224,9 +231,8 @@ func benchEncryptor(tc *testContext, b *testing.B) {
 
 		pt := hefloat.NewPlaintext(params, params.MaxLevel())
 
-		ct := rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 1, params.MaxLevel())
-
-		*ct.MetaData = *pt.MetaData
+		ct := hefloat.NewCiphertext(params, 1, params.MaxLevel())
+		ct.Randomize(params, sampling.NewSource(sampling.NewSeed()))
 
 		dec := tc.decryptor
 
@@ -241,19 +247,20 @@ func benchEncryptor(tc *testContext, b *testing.B) {
 func benchEvaluator(tc *testContext, b *testing.B) {
 
 	params := tc.params
+	source := sampling.NewSource(sampling.NewSeed())
 	plaintext := hefloat.NewPlaintext(params, params.MaxLevel())
-	plaintext.Value = rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 0, plaintext.Level()).Value[0]
+	plaintext.Randomize(params, source)
 
 	vector := make([]float64, params.MaxSlots())
 	for i := range vector {
 		vector[i] = 1
 	}
 
-	ciphertext1 := rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 1, params.MaxLevel())
-	ciphertext2 := rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 1, params.MaxLevel())
+	ciphertext1 := hefloat.NewCiphertext(params, 1, params.MaxLevel())
+	ciphertext2 := hefloat.NewCiphertext(params, 1, params.MaxLevel())
 
-	*ciphertext1.MetaData = *plaintext.MetaData
-	*ciphertext2.MetaData = *plaintext.MetaData
+	ciphertext1.Randomize(params, source)
+	ciphertext2.Randomize(params, source)
 
 	eval := tc.evaluator.WithKey(rlwe.NewMemEvaluationKeySet(tc.kgen.GenRelinearizationKeyNew(tc.sk)))
 

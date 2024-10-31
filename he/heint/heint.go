@@ -1,94 +1,44 @@
-// Package heint implements Homomorphic Encryption for encrypted modular arithmetic over the integers.
+// Package heint provides Homomorphic Encryption for encrypted modular arithmetic over the integers.
+// It is implemented as an unified RNS-accelerated version of the Fan-Vercauteren version of the
+// Brakerski's scale invariant homomorphic encryption scheme (BFV) and
+// Brakerski-Gentry-Vaikuntanathan (BGV) homomorphic encryption scheme.
 package heint
 
 import (
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/schemes/bgv"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
-type Integer interface {
-	bgv.Integer
+// NewPlaintext allocates a new rlwe.Plaintext.
+//
+// inputs:
+//   - params: an rlwe.ParameterProvider interface
+//   - level: the level of the plaintext
+//
+// output: a newly allocated rlwe.Plaintext at the specified level.
+//
+// Note: the user can update the field `MetaData` to set a specific scaling factor,
+// plaintext dimensions (if applicable) or encoding domain, before encoding values
+// on the created plaintext.
+func NewPlaintext(params Parameters, level int) (pt *rlwe.Plaintext) {
+	pt = rlwe.NewPlaintext(params, level, -1)
+	pt.IsBatched = true
+	pt.Scale = params.DefaultScale()
+	pt.LogDimensions = params.LogMaxDimensions()
+	return
 }
 
-type ParametersLiteral bgv.ParametersLiteral
-
-func NewParametersFromLiteral(paramsLit ParametersLiteral) (Parameters, error) {
-	params, err := bgv.NewParametersFromLiteral(bgv.ParametersLiteral(paramsLit))
-	return Parameters{Parameters: params}, err
-}
-
-type Parameters struct {
-	bgv.Parameters
-}
-
-func (p Parameters) MarshalJSON() (d []byte, err error) {
-	return p.Parameters.MarshalJSON()
-}
-
-func (p *Parameters) UnmarshalJSON(d []byte) (err error) {
-	return p.Parameters.UnmarshalJSON(d)
-}
-
-func (p Parameters) MarshalBinary() (d []byte, err error) {
-	return p.Parameters.MarshalBinary()
-}
-
-func (p *Parameters) UnmarshalBinary(d []byte) (err error) {
-	return p.Parameters.UnmarshalBinary(d)
-}
-
-func (p Parameters) Equal(other *Parameters) bool {
-	return p.Parameters.Equal(&other.Parameters)
-}
-
-func NewPlaintext(params Parameters, level int) *rlwe.Plaintext {
-	return bgv.NewPlaintext(params.Parameters, level)
-}
-
-func NewCiphertext(params Parameters, degree, level int) *rlwe.Ciphertext {
-	return bgv.NewCiphertext(params.Parameters, degree, level)
-}
-
-func NewEncryptor(params Parameters, key rlwe.EncryptionKey) *rlwe.Encryptor {
-	return rlwe.NewEncryptor(params, key)
-}
-
-func NewDecryptor(params Parameters, key *rlwe.SecretKey) *rlwe.Decryptor {
-	return rlwe.NewDecryptor(params, key)
-}
-
-func NewKeyGenerator(params Parameters) *rlwe.KeyGenerator {
-	return rlwe.NewKeyGenerator(params)
-}
-
-type Encoder struct {
-	bgv.Encoder
-}
-
-func NewEncoder(params Parameters) *Encoder {
-	return &Encoder{Encoder: *bgv.NewEncoder(params.Parameters)}
-}
-
-func (ecd Encoder) ShallowCopy() *Encoder {
-	return &Encoder{Encoder: *ecd.Encoder.ShallowCopy()}
-}
-
-type Evaluator struct {
-	bgv.Evaluator
-}
-
-func NewEvaluator(params Parameters, evk rlwe.EvaluationKeySet) *Evaluator {
-	return &Evaluator{Evaluator: *bgv.NewEvaluator(params.Parameters, evk)}
-}
-
-func (eval Evaluator) GetParameters() *Parameters {
-	return &Parameters{*eval.Evaluator.GetParameters()}
-}
-
-func (eval Evaluator) WithKey(evk rlwe.EvaluationKeySet) *Evaluator {
-	return &Evaluator{Evaluator: *eval.Evaluator.WithKey(evk)}
-}
-
-func (eval Evaluator) ShallowCopy() *Evaluator {
-	return &Evaluator{Evaluator: *eval.Evaluator.ShallowCopy()}
+// NewCiphertext allocates a new rlwe.Ciphertext.
+//
+// inputs:
+//   - params: an rlwe.ParameterProvider interface
+//   - degree: the degree of the ciphertext
+//   - level: the level of the Ciphertext
+//
+// output: a newly allocated rlwe.Ciphertext of the specified degree and level.
+func NewCiphertext(params Parameters, degree, level int) (ct *rlwe.Ciphertext) {
+	ct = rlwe.NewCiphertext(params, degree, level, -1)
+	ct.IsBatched = true
+	ct.Scale = params.DefaultScale()
+	ct.LogDimensions = params.LogMaxDimensions()
+	return
 }

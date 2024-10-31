@@ -3,9 +3,9 @@ package bootstrapping
 import (
 	"fmt"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he"
-	"github.com/tuneinsight/lattigo/v5/ring"
+	"github.com/Pro7ech/lattigo/he"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 // Ensures that the Evaluator complies to the he.Bootstrapper interface
@@ -73,10 +73,6 @@ func (eval Evaluator) BootstrapMany(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, e
 		}
 	}
 
-	for i := range cts {
-		cts[i].Scale = eval.ResidualParameters.DefaultScale()
-	}
-
 	return cts, err
 }
 
@@ -92,5 +88,5 @@ func (eval Evaluator) OutputLevel() int {
 
 // MinimumInputLevel returns the minimum level at which a ciphertext must be to be bootstrapped.
 func (eval Evaluator) MinimumInputLevel() int {
-	return eval.BootstrappingParameters.LevelsConsumedPerRescaling()
+	return eval.BootstrappingParameters.LevelsConsumedPerRescaling() - 1
 }

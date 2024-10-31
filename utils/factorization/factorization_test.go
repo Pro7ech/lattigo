@@ -4,8 +4,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/Pro7ech/lattigo/utils/factorization"
 	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/utils/factorization"
 )
 
 const (

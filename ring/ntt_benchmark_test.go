@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 )
 
 func BenchmarkNTT(b *testing.B) {
@@ -26,17 +26,12 @@ func BenchmarkNTT(b *testing.B) {
 
 func benchNTT(LogN, Qi int, b *testing.B) {
 	b.Run(fmt.Sprintf("Forward/N=%d/Qi=%d", 1<<LogN, Qi), func(b *testing.B) {
-		r, err := NewRing(1<<LogN, Qi60[:Qi])
+		r, err := NewRNSRing(1<<LogN, Qi60[:Qi])
 		if err != nil {
 			b.Fatal(err)
 		}
 
-		prng, err := sampling.NewPRNG()
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		p := NewUniformSampler(prng, r).ReadNew()
+		p := NewUniformSampler(sampling.NewSource([32]byte{}), r.ModuliChain()).ReadNew(r.N())
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			r.NTT(p, p)
@@ -46,17 +41,12 @@ func benchNTT(LogN, Qi int, b *testing.B) {
 
 func benchINTT(LogN, Qi int, b *testing.B) {
 	b.Run(fmt.Sprintf("Backward/N=%d/Qi=%d", 1<<LogN, Qi), func(b *testing.B) {
-		r, err := NewRing(1<<LogN, Qi60[:Qi])
+		r, err := NewRNSRing(1<<LogN, Qi60[:Qi])
 		if err != nil {
 			b.Fatal(err)
 		}
 
-		prng, err := sampling.NewPRNG()
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		p := NewUniformSampler(prng, r).ReadNew()
+		p := NewUniformSampler(sampling.NewSource([32]byte{}), r.ModuliChain()).ReadNew(r.N())
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			r.INTT(p, p)

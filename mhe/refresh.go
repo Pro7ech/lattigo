@@ -4,20 +4,24 @@ import (
 	"bufio"
 	"io"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/buffer"
 )
 
 // RefreshShare is a struct storing the decryption and recryption shares.
 type RefreshShare struct {
-	EncToShareShare KeySwitchShare
-	ShareToEncShare KeySwitchShare
 	MetaData        rlwe.MetaData
+	EncToShareShare KeySwitchingShare
+	ShareToEncShare KeySwitchingShare
+}
+
+func (share RefreshShare) Equal(other *RefreshShare) bool {
+	return share.MetaData.Equal(&other.MetaData) && share.EncToShareShare.Equal(&other.EncToShareShare) && share.ShareToEncShare.Equal(&other.ShareToEncShare)
 }
 
 // BinarySize returns the serialized size of the object in bytes.
 func (share RefreshShare) BinarySize() int {
-	return share.EncToShareShare.BinarySize() + share.ShareToEncShare.BinarySize() + share.MetaData.BinarySize()
+	return share.MetaData.BinarySize() + share.EncToShareShare.BinarySize() + share.ShareToEncShare.BinarySize()
 }
 
 // WriteTo writes the object on an io.Writer. It implements the io.WriterTo
@@ -35,11 +39,14 @@ func (share RefreshShare) WriteTo(w io.Writer) (n int64, err error) {
 	switch w := w.(type) {
 	case buffer.Writer:
 
-		if n, err = share.MetaData.WriteTo(w); err != nil {
-			return
+		var inc int64
+
+		if inc, err = share.MetaData.WriteTo(w); err != nil {
+			return n + inc, err
 		}
 
-		var inc int64
+		n += inc
+
 		if inc, err = share.EncToShareShare.WriteTo(w); err != nil {
 			return n + inc, err
 		}
@@ -69,13 +76,16 @@ func (share *RefreshShare) ReadFrom(r io.Reader) (n int64, err error) {
 	switch r := r.(type) {
 	case buffer.Reader:
 
-		if n, err = share.MetaData.ReadFrom(r); err != nil {
-			return
+		var inc int64
+
+		if inc, err = share.MetaData.ReadFrom(r); err != nil {
+			return n + inc, err
 		}
 
-		var inc int64
+		n += inc
+
 		if inc, err = share.EncToShareShare.ReadFrom(r); err != nil {
-			return
+			return n + inc, err
 		}
 
 		n += inc

@@ -11,7 +11,7 @@ import (
 	"math"
 	"math/big"
 
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 const (
@@ -27,7 +27,7 @@ var (
 // ApproximateCos computes a polynomial approximation of degree "degree" in Chebyshev basis of the function
 // cos(2*pi*x/2^"scnum") in the range -"K" to "K"
 // The nodes of the Chebyshev approximation are are located from -dev to +dev at each integer value between -K and -K
-func ApproximateCos(K, degree int, dev float64, scnum int) []*big.Float {
+func ApproximateCos(K, degree int, dev float64, scnum int) []big.Float {
 
 	// Gets the list of degree per interval and the total degree
 	deg, totdeg := genDegrees(degree, K, dev)
@@ -157,7 +157,7 @@ func genDegrees(degree, K int, dev float64) ([]int, int) {
 	return deg, totdeg
 }
 
-func genNodes(deg []int, dev float64, totdeg, K, scnum int) ([]*big.Float, []*big.Float) {
+func genNodes(deg []int, dev float64, totdeg, K, scnum int) ([]big.Float, []big.Float) {
 
 	var scfac = bignum.NewFloat(1<<scnum, EncodingPrecision)
 
@@ -169,9 +169,9 @@ func genNodes(deg []int, dev float64, totdeg, K, scnum int) ([]*big.Float, []*bi
 	// ===================
 
 	// nodes
-	var nodes = make([]*big.Float, totdeg)
+	var nodes = make([]big.Float, totdeg)
 	for i := range nodes {
-		nodes[i] = bignum.NewFloat(0, EncodingPrecision)
+		nodes[i].SetPrec(EncodingPrecision)
 	}
 
 	// Ensures deg[0] is even
@@ -200,7 +200,7 @@ func genNodes(deg []int, dev float64, totdeg, K, scnum int) ([]*big.Float, []*bi
 			cnt++
 
 			//  -i - cos(pi * (2j-1) / (2*deg[i])) * (1/intersize)
-			nodes[cnt].Neg(nodes[cnt-1])
+			nodes[cnt].Neg(&nodes[cnt-1])
 			cnt++
 		}
 	}
@@ -219,21 +219,21 @@ func genNodes(deg []int, dev float64, totdeg, K, scnum int) ([]*big.Float, []*bi
 		cnt++
 
 		// 0 - cos(pi * (2j-1) / (2*deg[i])) * (1/intersize)
-		nodes[cnt].Neg(nodes[cnt-1])
+		nodes[cnt].Neg(&nodes[cnt-1])
 		cnt++
 	}
 
 	// Evaluates the nodes y[i] = f(nodes[i])
-	var y = make([]*big.Float, totdeg)
+	var y = make([]big.Float, totdeg)
 	for i := 0; i < totdeg; i++ {
 		// y[i] = cos(2*pi*(nodes[i]-0.25)/r)
-		y[i] = cos2PiXMinusQuarterOverR(nodes[i], scfac)
+		y[i] = *cos2PiXMinusQuarterOverR(&nodes[i], scfac)
 	}
 
 	return nodes, y
 }
 
-func solve(totdeg, K, scnum int, nodes, y []*big.Float) []*big.Float {
+func solve(totdeg, K, scnum int, nodes, y []big.Float) []big.Float {
 
 	// 2^r
 	scfac := bignum.NewFloat(float64(int(1<<scnum)), EncodingPrecision)
@@ -248,43 +248,43 @@ func solve(totdeg, K, scnum int, nodes, y []*big.Float) []*big.Float {
 		for i := 0; i < totdeg-j; i++ {
 
 			// y[i] = y[i+1] - y[i]
-			y[i].Sub(y[i+1], y[i])
+			y[i].Sub(&y[i+1], &y[i])
 
 			// y[i] = (y[i+1] - y[i])/(nodes[i+j] - nodes[i])
-			tmp.Sub(nodes[i+j], nodes[i])
-			y[i].Quo(y[i], tmp)
+			tmp.Sub(&nodes[i+j], &nodes[i])
+			y[i].Quo(&y[i], tmp)
 		}
 	}
 
 	totdeg++
 
-	var x = make([]*big.Float, totdeg)
+	var x = make([]big.Float, totdeg)
 	for i := 0; i < totdeg; i++ {
 		// x[i] = K
-		x[i] = bignum.NewFloat(float64(K), EncodingPrecision)
+		x[i] = *bignum.NewFloat(float64(K), EncodingPrecision)
 
 		// x[i] = K/r
-		x[i].Quo(x[i], scfac)
+		x[i].Quo(&x[i], scfac)
 
 		// x[i] = (K/r) * cos(PI * i/(totdeg-1))
 		tmp.Mul(new(big.Float).SetInt64(int64(i)), pi)
 		tmp.Quo(tmp, new(big.Float).SetInt64(int64(totdeg-1)))
-		x[i].Mul(x[i], bignum.Cos(tmp))
+		x[i].Mul(&x[i], bignum.Cos(tmp))
 	}
 
-	var p = make([]*big.Float, totdeg)
+	var p = make([]big.Float, totdeg)
 	for i := 0; i < totdeg; i++ {
-		p[i] = new(big.Float).Set(y[0])
+		p[i].Set(&y[0])
 		for j := 1; j < totdeg-1; j++ {
-			tmp.Sub(x[i], nodes[j])
-			p[i].Mul(p[i], tmp)
-			p[i].Add(p[i], y[j])
+			tmp.Sub(&x[i], &nodes[j])
+			p[i].Mul(&p[i], tmp)
+			p[i].Add(&p[i], &y[j])
 		}
 	}
 
-	var T = make([][]*big.Float, totdeg)
+	var T = make([][]big.Float, totdeg)
 	for i := 0; i < totdeg; i++ {
-		T[i] = make([]*big.Float, totdeg)
+		T[i] = make([]big.Float, totdeg)
 	}
 
 	KBig := new(big.Float).SetInt64(int64(K))
@@ -292,23 +292,23 @@ func solve(totdeg, K, scnum int, nodes, y []*big.Float) []*big.Float {
 	// Constructs the totdeg x totdeg linear system using x
 	for i := 0; i < totdeg; i++ {
 
-		T[i][0] = bignum.NewFloat(1.0, EncodingPrecision)
+		T[i][0] = *bignum.NewFloat(1.0, EncodingPrecision)
 
-		T[i][1] = new(big.Float).Set(x[i])
+		T[i][1].Set(&x[i])
 
 		tmp.Quo(KBig, scfac)
 
-		T[i][1].Quo(T[i][1], tmp)
+		T[i][1].Quo(&T[i][1], tmp)
 
 		for j := 2; j < totdeg; j++ {
 
-			T[i][j] = bignum.NewFloat(2.0, EncodingPrecision)
+			T[i][j] = *bignum.NewFloat(2.0, EncodingPrecision)
 
 			tmp.Quo(KBig, scfac)
-			tmp.Quo(x[i], tmp)
-			T[i][j].Mul(T[i][j], tmp)
-			T[i][j].Mul(T[i][j], T[i][j-1])
-			T[i][j].Sub(T[i][j], T[i][j-2])
+			tmp.Quo(&x[i], tmp)
+			T[i][j].Mul(&T[i][j], tmp)
+			T[i][j].Mul(&T[i][j], &T[i][j-1])
+			T[i][j].Sub(&T[i][j], &T[i][j-2])
 		}
 	}
 
@@ -322,12 +322,12 @@ func solve(totdeg, K, scnum int, nodes, y []*big.Float) []*big.Float {
 
 		// Finds the max index in the i-th column
 		// of the triangular matrix
-		maxabs.Abs(T[i][i])
+		maxabs.Abs(&T[i][i])
 		maxindex = i
 		for j := i + 1; j < totdeg; j++ {
-			tmp.Abs(T[j][i])
+			tmp.Abs(&T[j][i])
 			if tmp.Cmp(maxabs) == 1 {
-				maxabs.Abs(T[j][i])
+				maxabs.Abs(&T[j][i])
 				maxindex = j
 			}
 		}
@@ -345,31 +345,31 @@ func solve(totdeg, K, scnum int, nodes, y []*big.Float) []*big.Float {
 
 		// SOLVES THE LINEAR SYSTEM
 		for j := i + 1; j < totdeg; j++ {
-			T[i][j].Quo(T[i][j], T[i][i])
+			T[i][j].Quo(&T[i][j], &T[i][i])
 		}
 
-		p[i].Quo(p[i], T[i][i])
-		T[i][i] = bignum.NewFloat(1.0, EncodingPrecision)
+		p[i].Quo(&p[i], &T[i][i])
+		T[i][i] = *bignum.NewFloat(1.0, EncodingPrecision)
 
 		for j := i + 1; j < totdeg; j++ {
-			tmp.Mul(T[j][i], p[i])
-			p[j].Sub(p[j], tmp)
+			tmp.Mul(&T[j][i], &p[i])
+			p[j].Sub(&p[j], tmp)
 			for l := i + 1; l < totdeg; l++ {
-				tmp.Mul(T[j][i], T[i][l])
-				T[j][l].Sub(T[j][l], tmp)
+				tmp.Mul(&T[j][i], &T[i][l])
+				T[j][l].Sub(&T[j][l], tmp)
 			}
-			T[j][i] = bignum.NewFloat(0.0, EncodingPrecision)
+			T[j][i] = *bignum.NewFloat(0.0, EncodingPrecision)
 		}
 	}
 
 	// GETS THE COEFFICIENTS
-	var c = make([]*big.Float, totdeg)
+	var c = make([]big.Float, totdeg)
 	c[totdeg-1] = p[totdeg-1]
 	for i := totdeg - 2; i >= 0; i-- {
-		c[i] = new(big.Float).Set(p[i])
+		c[i].Set(&p[i])
 		for j := i + 1; j < totdeg; j++ {
-			tmp.Mul(T[i][j], c[j])
-			c[i].Sub(c[i], tmp)
+			tmp.Mul(&T[i][j], &c[j])
+			c[i].Sub(&c[i], tmp)
 		}
 	}
 

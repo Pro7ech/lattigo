@@ -1,4 +1,4 @@
-// Package examples contains several example Go applications that use Lattigo in both the single- and multiparty settings,
+// Package examples contains several example Go applications that use lattigo in both the single- and multiparty settings,
 // as well as several example parameter sets. See examples/README.md for more information about the examples.
 //
 // Note that the code in this package, including the example parameter sets, is solely meant to illustrate the use of the library and facilitate quick experiments.

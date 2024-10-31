@@ -1,6 +1,7 @@
 package bignum
 
 import (
+	//"fmt"
 	"math/big"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestApproximation(t *testing.T) {
 		return
 	}
 
-	prec := uint(96)
+	prec := uint(256)
 
 	t.Run("Chebyshev", func(t *testing.T) {
 
@@ -40,24 +41,19 @@ func TestApproximation(t *testing.T) {
 
 	t.Run("MultiIntervalMinimaxRemez", func(t *testing.T) {
 
-		scanStep := NewFloat(1, prec)
-		scanStep.Quo(scanStep, NewFloat(32, prec))
+		f := func(x *big.Float) (y *big.Float) {
+			return Log(x)
+		}
 
 		intervals := []Interval{
-			{A: *NewFloat(-6, prec), B: *NewFloat(-5, prec), Nodes: 4},
-			{A: *NewFloat(-3, prec), B: *NewFloat(-2, prec), Nodes: 4},
-			{A: *NewFloat(-1, prec), B: *NewFloat(1, prec), Nodes: 4},
-			{A: *NewFloat(2, prec), B: *NewFloat(3, prec), Nodes: 4},
-			{A: *NewFloat(5, prec), B: *NewFloat(6, prec), Nodes: 4},
+			{A: *NewFloat(1e-4, prec), B: *NewFloat(148, prec), Nodes: 31},
 		}
 
 		params := RemezParameters{
-			Function:        sigmoid,
-			Basis:           Chebyshev,
-			Intervals:       intervals,
-			ScanStep:        scanStep,
-			Prec:            prec,
-			OptimalScanStep: false,
+			Function:  f,
+			Basis:     Chebyshev,
+			Intervals: intervals,
+			Prec:      prec,
 		}
 
 		r := NewRemez(params)

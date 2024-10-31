@@ -3,18 +3,16 @@ package hebin
 import (
 	"math/big"
 
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/utils"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // MulBySmallMonomialMod2N multiplies pol by x^n, with 0 <= n < N
-func mulBySmallMonomialMod2N(mask uint64, pol ring.Poly, n int) {
+func mulBySmallMonomialMod2N(mask uint64, coeffs []uint64, n int) {
 	if n != 0 {
-		N := len(pol.Coeffs[0])
-		pol.Coeffs[0] = append(pol.Coeffs[0][N-n:], pol.Coeffs[0][:N-n]...)
-		tmp := pol.Coeffs[0]
+		utils.RotateSliceAllocFree(coeffs, len(coeffs)-n, coeffs)
 		for j := 0; j < n; j++ {
-			tmp[j] = -tmp[j] & mask
+			coeffs[j] = -coeffs[j] & mask
 		}
 	}
 }

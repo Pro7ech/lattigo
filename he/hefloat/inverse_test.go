@@ -1,162 +1,144 @@
 package hefloat_test
 
 import (
-	"math"
 	"math/big"
 	"testing"
 
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/he/hefloat/bootstrapping"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat/bootstrapping"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
 )
 
-func TestInverse(t *testing.T) {
+func testinverse(tc *testContext, t *testing.T) {
 
-	paramsLiteral := testInsecurePrec90
+	params := tc.params
+	enc := tc.encryptorSk
+	sk := tc.sk
+	ecd := tc.encoder
+	dec := tc.decryptor
+	kgen := tc.kgen
 
-	for _, ringType := range []ring.Type{ring.Standard, ring.ConjugateInvariant} {
+	btp := bootstrapping.NewSecretKeyBootstrapper(params, sk)
 
-		paramsLiteral.RingType = ringType
+	valMin := 1 / 256.0
+	valMax := 256.0
 
-		if testing.Short() {
-			paramsLiteral.LogN = 10
-		}
-
-		params, err := hefloat.NewParametersFromLiteral(paramsLiteral)
-		require.NoError(t, err)
-
-		var tc *testContext
-		if tc, err = genTestParams(params); err != nil {
-			t.Fatal(err)
-		}
-
-		enc := tc.encryptorSk
-		sk := tc.sk
-		ecd := tc.encoder
-		dec := tc.decryptor
-		kgen := tc.kgen
-
-		btp := bootstrapping.NewSecretKeyBootstrapper(params, sk)
-
-		logmin := -30.0
-		logmax := 10.0
-
-		// 2^{-r}
-		min := math.Exp2(float64(logmin))
-
-		// 2^{r}
-		max := math.Exp2(float64(logmax))
-
-		var galKeys []*rlwe.GaloisKey
-		if params.RingType() == ring.Standard {
-			galKeys = append(galKeys, kgen.GenGaloisKeyNew(params.GaloisElementForComplexConjugation(), sk))
-		}
-
-		evk := rlwe.NewMemEvaluationKeySet(kgen.GenRelinearizationKeyNew(sk), galKeys...)
-
-		eval := tc.evaluator.WithKey(evk)
-
-		t.Run(GetTestName(params, "GoldschmidtDivisionNew"), func(t *testing.T) {
-
-			values, _, ciphertext := newTestVectors(tc, tc.encryptorSk, complex(min, 0), complex(2-min, 0), t)
-
-			one := new(big.Float).SetInt64(1)
-			for i := range values {
-				values[i][0].Quo(one, values[i][0])
-			}
-
-			invEval := hefloat.NewInverseEvaluator(params, eval, btp)
-
-			var err error
-			if ciphertext, err = invEval.GoldschmidtDivisionNew(ciphertext, logmin); err != nil {
-				t.Fatal(err)
-			}
-
-			hefloat.VerifyTestVectors(params, tc.encoder, tc.decryptor, values, ciphertext, 70, 0, *printPrecisionStats, t)
-		})
-
-		t.Run(GetTestName(params, "PositiveDomain"), func(t *testing.T) {
-
-			values, _, ct := newTestVectors(tc, enc, complex(0, 0), complex(max, 0), t)
-
-			invEval := hefloat.NewInverseEvaluator(params, eval, btp)
-
-			cInv, err := invEval.EvaluatePositiveDomainNew(ct, logmin, logmax)
-			require.NoError(t, err)
-
-			have := make([]*big.Float, params.MaxSlots())
-
-			require.NoError(t, ecd.Decode(dec.DecryptNew(cInv), have))
-
-			want := make([]*big.Float, params.MaxSlots())
-
-			threshold := bignum.NewFloat(min, params.EncodingPrecision())
-			for i := range have {
-				if new(big.Float).Abs(values[i][0]).Cmp(threshold) == -1 {
-					want[i] = have[i] // Ignores values outside of the interval
-				} else {
-					want[i] = new(big.Float).Quo(bignum.NewFloat(1, params.EncodingPrecision()), values[i][0])
-				}
-			}
-
-			hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, 70, 0, *printPrecisionStats, t)
-		})
-
-		t.Run(GetTestName(params, "NegativeDomain"), func(t *testing.T) {
-
-			values, _, ct := newTestVectors(tc, enc, complex(-max, 0), complex(0, 0), t)
-
-			invEval := hefloat.NewInverseEvaluator(params, eval, btp)
-
-			cInv, err := invEval.EvaluateNegativeDomainNew(ct, logmin, logmax)
-			require.NoError(t, err)
-
-			have := make([]*big.Float, params.MaxSlots())
-
-			require.NoError(t, ecd.Decode(dec.DecryptNew(cInv), have))
-
-			want := make([]*big.Float, params.MaxSlots())
-
-			threshold := bignum.NewFloat(min, params.EncodingPrecision())
-			for i := range have {
-				if new(big.Float).Abs(values[i][0]).Cmp(threshold) == -1 {
-					want[i] = have[i] // Ignores values outside of the interval
-				} else {
-					want[i] = new(big.Float).Quo(bignum.NewFloat(1, params.EncodingPrecision()), values[i][0])
-				}
-			}
-
-			hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, 70, 0, *printPrecisionStats, t)
-		})
-
-		t.Run(GetTestName(params, "FullDomain"), func(t *testing.T) {
-
-			values, _, ct := newTestVectors(tc, enc, complex(-max, 0), complex(max, 0), t)
-
-			invEval := hefloat.NewInverseEvaluator(params, eval, btp)
-
-			cInv, err := invEval.EvaluateFullDomainNew(ct, logmin, logmax, hefloat.NewMinimaxCompositePolynomial(hefloat.DefaultMinimaxCompositePolynomialForSign))
-			require.NoError(t, err)
-
-			have := make([]*big.Float, params.MaxSlots())
-
-			require.NoError(t, ecd.Decode(dec.DecryptNew(cInv), have))
-
-			want := make([]*big.Float, params.MaxSlots())
-
-			threshold := bignum.NewFloat(min, params.EncodingPrecision())
-			for i := range have {
-				if new(big.Float).Abs(values[i][0]).Cmp(threshold) == -1 {
-					want[i] = have[i] // Ignores values outside of the interval
-				} else {
-					want[i] = new(big.Float).Quo(bignum.NewFloat(1, params.EncodingPrecision()), values[i][0])
-				}
-			}
-
-			hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, 70, 0, *printPrecisionStats, t)
-		})
+	var galKeys []*rlwe.GaloisKey
+	if params.RingType() == ring.Standard {
+		galKeys = append(galKeys, kgen.GenGaloisKeyNew(params.GaloisElementForComplexConjugation(), sk))
 	}
+
+	evk := rlwe.NewMemEvaluationKeySet(kgen.GenRelinearizationKeyNew(sk), galKeys...)
+
+	eval := tc.evaluator.WithKey(evk)
+	one := bignum.NewFloat(1, params.EncodingPrecision())
+
+	t.Run(GetTestName(params, "InverseEvaluator/GoldschmidtDivisionNew"), func(t *testing.T) {
+
+		values, _, ct := newTestVectors(tc, tc.encryptorSk, complex(0.5, 0), complex(1.5, 0), t)
+
+		for i := range values {
+			values[i][0].Quo(one, &values[i][0])
+		}
+
+		invEval := hefloat.NewInverseEvaluator(params, eval, btp)
+		require.NoError(t, invEval.GoldschmidtDivision(7, ct))
+		hefloat.VerifyTestVectors(params, tc.encoder, tc.decryptor, values, ct, int(ecd.Prec())-15, 0, *printPrecisionStats, t)
+	})
+
+	t.Run(GetTestName(params, "InverseEvaluator/PositiveDomain"), func(t *testing.T) {
+
+		values, _, ct := newTestVectors(tc, enc, complex(valMin, 0), complex(valMax, 0), t)
+
+		invEval := hefloat.NewInverseEvaluator(params, eval, btp)
+		require.NoError(t, invEval.InversePositiveDomainNew(ct, valMin, valMax))
+
+		have := make([]big.Float, params.MaxSlots())
+
+		require.NoError(t, ecd.Decode(dec.DecryptNew(ct), have))
+
+		want := make([]big.Float, params.MaxSlots())
+		for i := range have {
+			want[i] = *new(big.Float).Quo(one, &values[i][0])
+		}
+
+		hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, int(ecd.Prec())-6, 0, *printPrecisionStats, t)
+	})
+
+	t.Run(GetTestName(params, "InverseEvaluator/NegativeDomain"), func(t *testing.T) {
+
+		values, _, ct := newTestVectors(tc, enc, complex(-valMax, 0), complex(-valMin, 0), t)
+
+		invEval := hefloat.NewInverseEvaluator(params, eval, btp)
+		require.NoError(t, invEval.InverseNegativeDomainNew(ct, valMin, valMax))
+
+		have := make([]big.Float, params.MaxSlots())
+
+		require.NoError(t, ecd.Decode(dec.DecryptNew(ct), have))
+
+		want := make([]big.Float, params.MaxSlots())
+		for i := range have {
+			want[i] = *new(big.Float).Quo(one, &values[i][0])
+		}
+
+		hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, int(ecd.Prec())-6, 0, *printPrecisionStats, t)
+	})
+
+	t.Run(GetTestName(params, "InverseEvaluator/FullDomain"), func(t *testing.T) {
+
+		values, _, ct := newTestVectors(tc, enc, complex(-valMax, 0), complex(valMax, 0), t)
+
+		invEval := hefloat.NewInverseEvaluator(params, eval, btp)
+		require.NoError(t, invEval.InverseFullDomainNew(ct, valMin, valMax, hefloat.NewMinimaxCompositePolynomial(hefloat.DefaultMinimaxCompositePolynomialForSign)))
+
+		have := make([]big.Float, params.MaxSlots())
+
+		require.NoError(t, ecd.Decode(dec.DecryptNew(ct), have))
+
+		want := make([]big.Float, params.MaxSlots())
+
+		threshold := bignum.NewFloat(valMin, params.EncodingPrecision())
+		for i := range have {
+			if new(big.Float).Abs(&values[i][0]).Cmp(threshold) == -1 {
+				want[i] = have[i] // Ignores values outside of the interval
+			} else {
+				want[i] = *new(big.Float).Quo(one, &values[i][0])
+			}
+		}
+
+		hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, int(ecd.Prec())-6, 0, *printPrecisionStats, t)
+	})
+
+	t.Run(GetTestName(params, "InverseEvaluator/InvSqrt"), func(t *testing.T) {
+
+		A := 0.25
+		B := 0.75
+		r := 11
+
+		values, _, ct := newTestVectors(tc, enc, complex(A, 0), complex(B, 0), t)
+
+		invEval := hefloat.NewInverseEvaluator(params, eval, btp)
+
+		half := ct.Clone()
+
+		require.NoError(t, eval.Mul(half, 0.5, half))
+		require.NoError(t, eval.Rescale(half, half))
+
+		require.NoError(t, invEval.InvSqrt(ct, half, r))
+
+		have := make([]big.Float, params.MaxSlots())
+
+		require.NoError(t, ecd.Decode(dec.DecryptNew(ct), have))
+
+		want := make([]big.Float, params.MaxSlots())
+		for i := range have {
+			want[i].Sqrt(&values[i][0])
+			want[i].Quo(one, &want[i])
+		}
+
+		hefloat.VerifyTestVectors(params, tc.encoder, nil, want, have, int(ecd.Prec())-10, 0, *printPrecisionStats, t)
+	})
 }

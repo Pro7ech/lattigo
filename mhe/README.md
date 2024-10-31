@@ -1,12 +1,12 @@
 # MHE
 The MHE package implements several Multiparty Homomorphic Encryption (MHE) primitives based on Ring-Learning-with-Errors (RLWE).
-It provides generic interfaces for the local steps of the MHE-based Secure Multiparty Computation (MHE-MPC) protocol that are common across all the RLWE distributed schemes implemented in Lattigo (e.g., collective key generation).
+It provides generic interfaces for the local steps of the MHE-based Secure Multiparty Computation (MHE-MPC) protocol that are common across all the RLWE distributed schemes implemented in lattigo (e.g., collective key generation).
 The `mhe/heinteger` and `mhe/hefloat` packages import `mhe` and provide scheme-specific functionalities (e.g., interactive bootstrapping).
 
 This package implements local operations only, hence does not assume or provide any network-layer protocol implementation.
 However, it provides serialization methods for all relevant structures that implement the standard `encoding.BinaryMarshaller` and `encoding.BinaryUnmarshaller` interfaces (see [https://pkg.go.dev/encoding](https://pkg.go.dev/encoding)) as well as the `io.WriterTo` and `io.ReaderFrom` interfaces (see [https://pkg.go.dev/encoding](https://pkg.go.dev/io)).
 
-The MHE-MPC protocol implemented in Lattigo is based on the constructions described in ["Multiparty Homomorphic Encryption from Ring-Learning-with-Errors"](https://eprint.iacr.org/2020/304.pdf) by Mouchet et al. (2021), which is an RLWE instantiation of the MPC protocol described in ["Multiparty computation with low communication, computation and interaction via threshold FHE"](https://eprint.iacr.org/2011/613.pdf) by Asharov et al. (2012).
+The MHE-MPC protocol implemented in the library is based on the constructions described in ["Multiparty Homomorphic Encryption from Ring-Learning-with-Errors"](https://eprint.iacr.org/2020/304.pdf) by Mouchet et al. (2021), which is an RLWE instantiation of the MPC protocol described in ["Multiparty computation with low communication, computation and interaction via threshold FHE"](https://eprint.iacr.org/2011/613.pdf) by Asharov et al. (2012).
 
 ## MHE-MPC Protocol Overview
 
@@ -19,7 +19,7 @@ The protocol is generic and covers several system- and adversary-models:
 
 **Anytrust vs Full-threshold Access-structure**. As for many MPC protocols, the assumption on the worst-case number of corrupted parties can be mapped in the cryptographic access-control mechanism (the _access structure_). The implemented MHE-MPC protocol is "anytrust" (N-out-of-N-threshold) by default, but can be relaxed to any positive threshold t-out-of-N (see Threshold Secret-Key Generation).
 
-**Passive vs Active Adversaries**. The implemented MHE-MPC protocol is secure against passive adversaries, and can in theory be extended to active security by requiring the parties to produce proofs that their shares are correctly computed for every round. Note that those proofs are not implemented in Lattigo.
+**Passive vs Active Adversaries**. The implemented MHE-MPC protocol is secure against passive adversaries, and can in theory be extended to active security by requiring the parties to produce proofs that their shares are correctly computed for every round. Note that those proofs are not implemented in this library.
 
 An execution of the MHE-based MPC protocol has two phases: the Setup phase and the Evaluation phase, each of which comprises a number of sub-protocols as depicted below (the details of each protocols are provided later).
 
@@ -41,7 +41,7 @@ An execution of the MHE-based MPC protocol has two phases: the Setup phase and t
 
 ## MHE-MPC Protocol Steps Description
 
-This section provides a description for each sub-protocol of the MHE-MPC protocol and provides pointers to the relevant Lattigo types and methods.
+This section provides a description for each sub-protocol of the MHE-MPC protocol and provides pointers to the relevant types and methods.
 This description is a first draft and will evolve in the future.
 For concrete code examples, see the `example/mhe` folders.
 For a more formal exposition, see ["Multiparty Homomorphic Encryption from Ring-Learning-with-Errors"](https://eprint.iacr.org/2020/304.pdf) and [An Efficient Threshold Access-Structure for RLWE-Based Multiparty Homomorphic Encryption](https://eprint.iacr.org/2022/780).
@@ -62,7 +62,7 @@ However, unlike LSSS-based MPC, the setup produces public-keys that can be re-us
 
 #### 1.i Secret Keys Generation
 The parties generate their individual secret-keys locally by using a `rlwe.KeyGenerator`; this provides them with a `rlwe.SecretKey` type.
-See [core/rlwe/keygenerator.go](../core/rlwe/keygenerator.go) for further information on key-generation.
+See [rlwe/keygenerator.go](../rlwe/keygenerator.go) for further information on key-generation.
 
 The _ideal secret-key_ is implicitly defined as the sum of all secret-keys.
 Hence, this secret-key enforces an _N-out-N_ access structure which requires all the parties to collaborate in a ciphertext decryption and thus tolerates N-1 dishonest parties.
@@ -138,7 +138,7 @@ The protocol is implemented by the  `mhe.EvaluationKeyGenProtocol` type and its 
 The parties provide their inputs for the computation during the Input Phase.
 They use the collective encryption-key generated during the Setup Phase to encrypt their inputs, and send them through the public channel.
 Since the collective encryption-key is a valid RLWE public encryption-key, it can be used directly with the single-party scheme.
-Hence, the parties can use the `Encoder` and `Encryptor` interfaces of the desired encryption scheme (see [heint.Encoder](../he/heint/heint.go), [hefloat.Encoder](../he/hefloat/hefloat.go) and [rlwe.Encryptor](../core/rlwe/encryptor.go)).
+Hence, the parties can use the `Encoder` and `Encryptor` interfaces of the desired encryption scheme (see [heint.Encoder](../he/heint/heint.go), [hefloat.Encoder](../he/hefloat/hefloat.go) and [rlwe.Encryptor](../rlwe/encryptor.go)).
 
 #### 2.ii Circuit Evaluation step
 The computation of the desired function is performed homomorphically during the Evaluation Phase.
@@ -163,7 +163,7 @@ While both protocol variants have slightly different local operations, their ste
 - From the aggregated `mhe.KeySwitchShare`, any party can derive the ciphertext re-encrypted under _s'_ by using the `(Public)KeySwitchProtocol.KeySwitch` method.
 
 ##### 2.iii.b Decryption
-Once the receivers have obtained the ciphertext re-encrypted under their respective keys, they can use the usual decryption algorithm of the single-party scheme to obtain the plaintext result (see [rlwe.Decryptor](../core/rlwe/decryptor.go).
+Once the receivers have obtained the ciphertext re-encrypted under their respective keys, they can use the usual decryption algorithm of the single-party scheme to obtain the plaintext result (see [rlwe.Decryptor](../rlwe/decryptor.go).
 
 ## References
 

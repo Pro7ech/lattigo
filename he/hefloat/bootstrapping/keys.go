@@ -1,8 +1,8 @@
 package bootstrapping
 
 import (
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 // EvaluationKeys is a struct storing the different
@@ -117,21 +117,25 @@ func (p Parameters) GenEvaluationKeys(skN1 *rlwe.SecretKey) (btpkeys *Evaluation
 
 	} else {
 
-		ringQ := paramsN2.RingQ()
-		ringP := paramsN2.RingP()
+		rQ := paramsN2.RingQ()
+		rP := paramsN2.RingP()
 
 		// Else, keeps the same secret, but extends to the full modulus of the bootstrapping parameters.
 		skN2 = rlwe.NewSecretKey(paramsN2)
-		buff := ringQ.NewPoly()
+		buff := rQ.NewRNSPoly()
 
-		// Extends basis Q0 -> QL
-		rlwe.ExtendBasisSmallNormAndCenterNTTMontgomery(ringQ, ringQ, skN1.Value.Q, buff, skN2.Value.Q)
-
-		// Extends basis Q0 -> P
-		rlwe.ExtendBasisSmallNormAndCenterNTTMontgomery(ringQ, ringP, skN1.Value.Q, buff, skN2.Value.P)
+		// Extends basis Q0 -> QL * P
+		paramsN2.RingQ().AtLevel(0).INTT(skN1.Q, buff)
+		paramsN2.RingQ().AtLevel(0).IMForm(buff, buff)
+		ring.ExtendBasisSmallNorm(rQ[0].Modulus, rQ.ModuliChain(), buff, skN2.Q)
+		ring.ExtendBasisSmallNorm(rQ[0].Modulus, rP.ModuliChain(), buff, skN2.P)
+		rQ.NTT(skN2.Q, skN2.Q)
+		rQ.MForm(skN2.Q, skN2.Q)
+		rP.NTT(skN2.P, skN2.P)
+		rP.MForm(skN2.P, skN2.P)
 	}
 
-	EvkDenseToSparse, EvkSparseToDense := p.genEncapsulationEvaluationKeysNew(skN2)
+	EvkDenseToSparse, EvkSparseToDense := p.GenEncapsulationEvaluationKeysNew(skN2)
 
 	rlk := kgen.GenRelinearizationKeyNew(skN2)
 	gks := kgen.GenGaloisKeysNew(append(p.GaloisElements(paramsN2), paramsN2.GaloisElementForComplexConjugation()), skN2)
@@ -148,7 +152,7 @@ func (p Parameters) GenEvaluationKeys(skN1 *rlwe.SecretKey) (btpkeys *Evaluation
 }
 
 // GenEncapsulationEvaluationKeysNew generates the low level encapsulation EvaluationKeys for the bootstrapping.
-func (p Parameters) genEncapsulationEvaluationKeysNew(skDense *rlwe.SecretKey) (EvkDenseToSparse, EvkSparseToDense *rlwe.EvaluationKey) {
+func (p Parameters) GenEncapsulationEvaluationKeysNew(skDense *rlwe.SecretKey) (EvkDenseToSparse, EvkSparseToDense *rlwe.EvaluationKey) {
 
 	params := p.BootstrappingParameters
 

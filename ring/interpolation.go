@@ -17,15 +17,20 @@ type Interpolator struct {
 // prime or not congruent to 1 mod 2N, where N is the next power of two greater
 // than degree+1.
 func NewInterpolator(degree int, T uint64) (itp *Interpolator, err error) {
+
 	itp = new(Interpolator)
 
-	if itp.r, err = NewRing(1<<bits.Len64(uint64(degree)), []uint64{T}); err != nil {
+	if itp.r, err = NewRing(1<<bits.Len64(uint64(degree)), T, 1); err != nil {
+		return nil, err
+	}
+
+	if err = itp.r.GenNTTTable(); err != nil {
 		return nil, err
 	}
 
 	// NTT(x)
 	itp.x = itp.r.NewPoly()
-	itp.x.Coeffs[0][1] = 1
+	itp.x[1] = 1
 	itp.r.NTT(itp.x, itp.x)
 	itp.r.MForm(itp.x, itp.x)
 
@@ -33,49 +38,47 @@ func NewInterpolator(degree int, T uint64) (itp *Interpolator, err error) {
 }
 
 // Interpolate takes a list of roots the coefficients of P(roots) = 0 mod T.
-func (itp *Interpolator) Interpolate(roots []uint64) (coeffs []uint64) {
+func (itp *Interpolator) Interpolate(roots []uint64) (coeffs Poly) {
 
 	r := itp.r
-	s := r.SubRings[0]
 	x := itp.x
-	T := s.Modulus
-	mredParams := s.MRedConstant
-	bredParams := s.BRedConstant
+	T := r.Modulus
+	mredParams := r.MRedConstant
+	bredParams := r.BRedConstant
 
 	// res = NTT(x-root[0])
-	res := *itp.x.CopyNew()
+	res := *itp.x.Clone()
 	r.SubScalar(res, MForm(roots[0], T, bredParams), res)
 
 	// res = res * (x-root[i])
 	for i := 1; i < len(roots); i++ {
-		subScalarMontgomeryAndMulCoeffsMontgomery(x.Coeffs[0], MForm(roots[i], T, bredParams), res.Coeffs[0], res.Coeffs[0], T, mredParams)
+		subScalarMontgomeryAndMulCoeffsMontgomery(x, MForm(roots[i], T, bredParams), res, res, T, mredParams)
 	}
 
 	r.INTT(res, res)
 
-	return res.Coeffs[0][:len(roots)+1]
+	return res[:len(roots)+1]
 }
 
 // Lagrange takes as input (x, y) and returns P(xi) = yi mod T.
 func (itp *Interpolator) Lagrange(x, y []uint64) (coeffs []uint64, err error) {
 	r := itp.r
-	s := r.SubRings[0]
 	X := itp.x
-	T := s.Modulus
-	N := r.N()
-	mredParams := s.MRedConstant
-	bredParams := s.BRedConstant
+	T := r.Modulus
+	N := r.N
+	mredParams := r.MRedConstant
+	bredParams := r.BRedConstant
 
 	// Powers of w are stored in bit-reversed order -> even powers of w are on the right n half
 	roots := make(map[uint64]bool) // -> map that stores all the roots of X^{N} + 1 mod T
 	for i := 0; i < N>>1; i++ {
-		roots[s.RootsForward[N>>1+i]] = true
-		roots[s.RootsBackward[N>>1+i]] = true
+		roots[r.RootsForward[N>>1+i]] = true
+		roots[r.RootsBackward[N>>1+i]] = true
 	}
 
 	basis := r.NewPoly()
 	for i := 0; i < N; i++ {
-		basis.Coeffs[0][i] = 1
+		basis[i] = 1
 	}
 
 	// Computes the Lagrange basis (X-x[0]) * (X-x[1]) * ... * (X-x[i])
@@ -87,7 +90,7 @@ func (itp *Interpolator) Lagrange(x, y []uint64) (coeffs []uint64, err error) {
 		if _, ok := roots[x[i]]; ok {
 			missing[x[i]] = true
 		} else {
-			subScalarMontgomeryAndMulCoeffsMontgomery(X.Coeffs[0], MForm(x[i], T, bredParams), basis.Coeffs[0], basis.Coeffs[0], T, mredParams)
+			subScalarMontgomeryAndMulCoeffsMontgomery(X, MForm(x[i], T, bredParams), basis, basis, T, mredParams)
 		}
 	}
 
@@ -97,7 +100,7 @@ func (itp *Interpolator) Lagrange(x, y []uint64) (coeffs []uint64, err error) {
 
 	for i := 0; i < len(x); i++ {
 
-		tmp.Copy(basis)
+		tmp.Copy(&basis)
 
 		// If x[i] is a root of X^{N} + 1 mod T then it is not part
 		// of the Lagrange basis pre-computation, so all we need is
@@ -107,7 +110,7 @@ func (itp *Interpolator) Lagrange(x, y []uint64) (coeffs []uint64, err error) {
 			// with the missing roots, except x[i]
 			for root := range missing {
 				if root != x[i] {
-					subScalarMontgomeryAndMulCoeffsMontgomery(X.Coeffs[0], MForm(root, T, bredParams), tmp.Coeffs[0], tmp.Coeffs[0], T, mredParams)
+					subScalarMontgomeryAndMulCoeffsMontgomery(X, MForm(root, T, bredParams), tmp, tmp, T, mredParams)
 				}
 			}
 
@@ -118,19 +121,19 @@ func (itp *Interpolator) Lagrange(x, y []uint64) (coeffs []uint64, err error) {
 		} else {
 			// Continue with all the missing roots
 			for root := range missing {
-				subScalarMontgomeryAndMulCoeffsMontgomery(X.Coeffs[0], MForm(root, T, bredParams), tmp.Coeffs[0], tmp.Coeffs[0], T, mredParams)
+				subScalarMontgomeryAndMulCoeffsMontgomery(X, MForm(root, T, bredParams), tmp, tmp, T, mredParams)
 			}
 
 			// And then removes (X - x[i])
-			s.SubScalar(X.Coeffs[0], x[i], tmp1.Coeffs[0])
+			r.SubScalar(X, x[i], tmp1)
 
 			// TODO: unrol loop and use unsafe
-			coeffs := tmp1.Coeffs[0]
+			coeffs := tmp1
 			for j := 0; j < N; j++ {
-				coeffs[j] = ModexpMontgomery(coeffs[j], int(T-2), T, mredParams, bredParams)
+				coeffs[j] = ModExpMontgomery(coeffs[j], T-2, T, mredParams, bredParams)
 			}
 
-			s.MulCoeffsMontgomery(tmp.Coeffs[0], tmp1.Coeffs[0], tmp.Coeffs[0])
+			r.MulCoeffsMontgomery(tmp, tmp1, tmp)
 		}
 
 		// prod(x[i] - x[j]) i != j
@@ -149,12 +152,12 @@ func (itp *Interpolator) Lagrange(x, y []uint64) (coeffs []uint64, err error) {
 		den = BRed(y[i], den, T, bredParams)
 
 		// P(X) += (y[i] / prod(x[i] - x[j])) * prod(X-x[j])
-		s.MulScalarMontgomeryThenAdd(tmp.Coeffs[0], MForm(den, T, bredParams), poly.Coeffs[0])
+		r.MulScalarMontgomeryThenAdd(tmp, MForm(den, T, bredParams), poly)
 	}
 
 	r.INTT(poly, poly)
 
-	return poly.Coeffs[0][:len(x)], nil
+	return poly[:len(x)], nil
 
 }
 

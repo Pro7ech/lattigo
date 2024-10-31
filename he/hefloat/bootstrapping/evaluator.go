@@ -5,10 +5,10 @@ import (
 	"math"
 	"math/big"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/schemes/ckks"
+	"github.com/Pro7ech/lattigo/he"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 // Evaluator is a struct to store a memory buffer with the plaintext matrices,
@@ -21,20 +21,23 @@ type Evaluator struct {
 	*hefloat.Mod1Evaluator
 	*EvaluationKeys
 
-	ckks.DomainSwitcher
+	hefloat.DomainSwitcher
 
 	// [1, x, x^2, x^4, ..., x^N1/2] / (X^N1 +1)
-	xPow2N1 []ring.Poly
+	xPow2N1 []ring.RNSPoly
 	// [1, x, x^2, x^4, ..., x^N2/2] / (X^N2 +1)
-	xPow2N2 []ring.Poly
+	xPow2N2 []ring.RNSPoly
 	// [1, x^-1, x^-2, x^-4, ..., x^-N2/2] / (X^N2 +1)
-	xPow2InvN2 []ring.Poly
+	xPow2InvN2 []ring.RNSPoly
 
-	Mod1Parameters hefloat.Mod1Parameters
-	S2CDFTMatrix   hefloat.DFTMatrix
-	C2SDFTMatrix   hefloat.DFTMatrix
+	Mod1Parameters     hefloat.Mod1Parameters
+	S2CDFTMatrix       *hefloat.DFTMatrix
+	C2SDFTMatrix       *hefloat.DFTMatrix
+	C2SDFTMatrixBypass *hefloat.DFTMatrix
 
 	SkDebug *rlwe.SecretKey
+
+	HoistingBuffer rlwe.HoistingBuffer
 }
 
 // NewEvaluator creates a new Evaluator.
@@ -56,42 +59,34 @@ func NewEvaluator(btpParams Parameters, evk *EvaluationKeys) (eval *Evaluator, e
 		}
 
 		var err error
-		if eval.DomainSwitcher, err = ckks.NewDomainSwitcher(paramsN2.Parameters, evk.EvkCmplxToReal, evk.EvkRealToCmplx); err != nil {
-			return nil, fmt.Errorf("cannot NewBootstrapper: ckks.NewDomainSwitcher: %w", err)
+		if eval.DomainSwitcher, err = hefloat.NewDomainSwitcher(paramsN2, evk.EvkCmplxToReal, evk.EvkRealToCmplx); err != nil {
+			return nil, fmt.Errorf("cannot NewBootstrapper: hefloat.NewDomainSwitcher: %w", err)
 		}
 
 		// The switch to standard to conjugate invariant multiplies the scale by 2
-		btpParams.SlotsToCoeffsParameters.Scaling = new(big.Float).SetFloat64(0.5)
+		btpParams.S2C.Scaling = new(big.Float).SetFloat64(0.5)
 	}
 
 	eval.Parameters = btpParams
 
 	if paramsN1.N() != paramsN2.N() {
-		eval.xPow2N1 = rlwe.GenXPow2(paramsN1.RingQ().AtLevel(0), paramsN2.LogN(), false)
-		eval.xPow2N2 = rlwe.GenXPow2(paramsN2.RingQ().AtLevel(0), paramsN2.LogN(), false)
-		eval.xPow2InvN2 = rlwe.GenXPow2(paramsN2.RingQ(), paramsN2.LogN(), true)
-	}
-
-	if btpParams.Mod1ParametersLiteral.Mod1Type == hefloat.SinContinuous && btpParams.Mod1ParametersLiteral.DoubleAngle != 0 {
-		return nil, fmt.Errorf("cannot use double angle formula for Mod1Type = Sin -> must use Mod1Type = Cos")
-	}
-
-	if btpParams.Mod1ParametersLiteral.Mod1Type == hefloat.CosDiscrete && btpParams.Mod1ParametersLiteral.Mod1Degree < 2*(btpParams.Mod1ParametersLiteral.K-1) {
-		return nil, fmt.Errorf("Mod1Type 'hefloat.CosDiscrete' uses a minimum degree of 2*(K-1) but EvalMod degree is smaller")
+		eval.xPow2N1 = he.GenXPow2NTT(paramsN1.RingQ().AtLevel(0), paramsN2.LogN(), false)
+		eval.xPow2N2 = he.GenXPow2NTT(paramsN2.RingQ().AtLevel(0), paramsN2.LogN(), false)
+		eval.xPow2InvN2 = he.GenXPow2NTT(paramsN2.RingQ(), paramsN2.LogN(), true)
 	}
 
 	switch btpParams.CircuitOrder {
 	case ModUpThenEncode:
-		if btpParams.CoeffsToSlotsParameters.LevelStart-btpParams.CoeffsToSlotsParameters.Depth(true) != btpParams.Mod1ParametersLiteral.LevelStart {
-			return nil, fmt.Errorf("starting level and depth of CoeffsToSlotsParameters inconsistent starting level of Mod1ParametersLiteral")
+		if btpParams.C2S.LevelQ-btpParams.C2S.Depth(true) != btpParams.Mod1.LevelQ {
+			return nil, fmt.Errorf("starting level and depth of C2S inconsistent starting level of Mod1")
 		}
 
-		if btpParams.Mod1ParametersLiteral.LevelStart-btpParams.Mod1ParametersLiteral.Depth() != btpParams.SlotsToCoeffsParameters.LevelStart {
-			return nil, fmt.Errorf("starting level and depth of Mod1ParametersLiteral inconsistent starting level of CoeffsToSlotsParameters")
+		if btpParams.Mod1.LevelQ-btpParams.Mod1.Depth() != btpParams.S2C.LevelQ {
+			return nil, fmt.Errorf("starting level and depth of Mod1 inconsistent starting level of C2S")
 		}
 	case DecodeThenModUp:
-		if btpParams.BootstrappingParameters.MaxLevel()-btpParams.CoeffsToSlotsParameters.Depth(true) != btpParams.Mod1ParametersLiteral.LevelStart {
-			return nil, fmt.Errorf("starting level and depth of Mod1ParametersLiteral inconsistent starting level of CoeffsToSlotsParameters")
+		if btpParams.BootstrappingParameters.MaxLevel()-btpParams.C2S.Depth(true) != btpParams.Mod1.LevelQ {
+			return nil, fmt.Errorf("starting level and depth of Mod1 inconsistent starting level of C2S")
 		}
 	case Custom:
 	default:
@@ -116,6 +111,8 @@ func NewEvaluator(btpParams Parameters, evk *EvaluationKeys) (eval *Evaluator, e
 
 	eval.Mod1Evaluator = hefloat.NewMod1Evaluator(eval.Evaluator, hefloat.NewPolynomialEvaluator(params, eval.Evaluator), eval.Mod1Parameters)
 
+	eval.HoistingBuffer = eval.Evaluator.NewHoistingBuffer(params.MaxLevelQ(), params.MaxLevelP())
+
 	return
 }
 
@@ -123,33 +120,36 @@ func NewEvaluator(btpParams Parameters, evk *EvaluationKeys) (eval *Evaluator, e
 // shared with the receiver and the temporary buffers are reallocated. The receiver and the returned
 // Evaluator can be used concurrently.
 func (eval Evaluator) ShallowCopy() *Evaluator {
+
 	heEvaluator := eval.Evaluator.ShallowCopy()
 
 	paramsN1 := eval.ResidualParameters
 	paramsN2 := eval.BootstrappingParameters
 
-	var DomainSwitcher ckks.DomainSwitcher
+	var DomainSwitcher hefloat.DomainSwitcher
 	if paramsN1.RingType() == ring.ConjugateInvariant {
 		var err error
-		if DomainSwitcher, err = ckks.NewDomainSwitcher(paramsN2.Parameters, eval.EvkCmplxToReal, eval.EvkRealToCmplx); err != nil {
-			panic(fmt.Errorf("cannot NewBootstrapper: ckks.NewDomainSwitcher: %w", err))
+		if DomainSwitcher, err = hefloat.NewDomainSwitcher(paramsN2, eval.EvkCmplxToReal, eval.EvkRealToCmplx); err != nil {
+			panic(fmt.Errorf("cannot NewBootstrapper: hefloat.NewDomainSwitcher: %w", err))
 		}
 	}
 
 	return &Evaluator{
-		Parameters:     eval.Parameters,
-		EvaluationKeys: eval.EvaluationKeys,
-		Mod1Parameters: eval.Mod1Parameters,
-		S2CDFTMatrix:   eval.S2CDFTMatrix,
-		C2SDFTMatrix:   eval.C2SDFTMatrix,
-		Evaluator:      heEvaluator,
-		xPow2N1:        eval.xPow2N1,
-		xPow2N2:        eval.xPow2N2,
-		xPow2InvN2:     eval.xPow2InvN2,
-		DomainSwitcher: DomainSwitcher,
-		DFTEvaluator:   hefloat.NewDFTEvaluator(paramsN2, heEvaluator),
-		Mod1Evaluator:  hefloat.NewMod1Evaluator(heEvaluator, hefloat.NewPolynomialEvaluator(paramsN2, heEvaluator), eval.Mod1Parameters),
-		SkDebug:        eval.SkDebug,
+		Parameters:         eval.Parameters,
+		EvaluationKeys:     eval.EvaluationKeys,
+		Mod1Parameters:     eval.Mod1Parameters,
+		S2CDFTMatrix:       eval.S2CDFTMatrix,
+		C2SDFTMatrix:       eval.C2SDFTMatrix,
+		C2SDFTMatrixBypass: eval.C2SDFTMatrixBypass,
+		Evaluator:          heEvaluator,
+		xPow2N1:            eval.xPow2N1,
+		xPow2N2:            eval.xPow2N2,
+		xPow2InvN2:         eval.xPow2InvN2,
+		DomainSwitcher:     DomainSwitcher,
+		DFTEvaluator:       hefloat.NewDFTEvaluator(paramsN2, heEvaluator),
+		Mod1Evaluator:      hefloat.NewMod1Evaluator(heEvaluator, hefloat.NewPolynomialEvaluator(paramsN2, heEvaluator), eval.Mod1Parameters),
+		HoistingBuffer:     heEvaluator.NewHoistingBuffer(paramsN2.MaxLevelQ(), paramsN2.MaxLevelP()),
+		SkDebug:            eval.SkDebug,
 	}
 }
 
@@ -182,16 +182,13 @@ func (eval *Evaluator) initialize(btpParams Parameters) (err error) {
 	eval.Parameters = btpParams
 	params := btpParams.BootstrappingParameters
 
-	if eval.Mod1Parameters, err = hefloat.NewMod1ParametersFromLiteral(params, btpParams.Mod1ParametersLiteral); err != nil {
+	if eval.Mod1Parameters, err = hefloat.NewMod1ParametersFromLiteral(params, btpParams.Mod1); err != nil {
 		return
 	}
 
-	scFac := eval.Mod1Parameters.ScFac()
-	K := eval.Mod1Parameters.K() / scFac
-
 	// Correcting factor for approximate division by Q
 	// The second correcting factor for approximate multiplication by Q is included in the coefficients of the EvalMod polynomials
-	qDiff := eval.Mod1Parameters.QDiff()
+	qDiff := eval.Mod1Parameters.QDiff
 
 	// If the scale used during the EvalMod step is smaller than Q0, then we cannot increase the scale during
 	// the EvalMod step to get a free division by MessageRatio, and we need to do this division (totally or partly)
@@ -211,26 +208,36 @@ func (eval *Evaluator) initialize(btpParams Parameters) (err error) {
 	scale := eval.BootstrappingParameters.DefaultScale().Float64()
 	offset := eval.Mod1Parameters.ScalingFactor().Float64() / eval.Mod1Parameters.MessageRatio()
 
-	C2SScaling := new(big.Float).SetFloat64(qDiv / (K * scFac * qDiff))
+	C2SScaling := new(big.Float).SetFloat64(qDiv / (eval.Mod1Parameters.Mod1Interval() * qDiff))
+
+	if btpParams.C2S.Scaling == nil {
+		eval.C2S.Scaling = C2SScaling
+	} else {
+		eval.C2S.Scaling = new(big.Float).Mul(btpParams.C2S.Scaling, C2SScaling)
+	}
+
 	StCScaling := new(big.Float).SetFloat64(scale / offset)
 
-	if eval.CoeffsToSlotsParameters.Scaling == nil {
-		eval.CoeffsToSlotsParameters.Scaling = C2SScaling
-	} else {
-		eval.CoeffsToSlotsParameters.Scaling.Mul(eval.CoeffsToSlotsParameters.Scaling, C2SScaling)
+	if eval.EvalRound {
+		C2SBypass := eval.GetC2SBypass()
+		C2SBypass.Scaling = new(big.Float).SetFloat64(qDiv)
+
+		if eval.C2SDFTMatrixBypass, err = hefloat.NewDFTMatrixFromLiteral(params, C2SBypass, encoder); err != nil {
+			return
+		}
 	}
 
-	if eval.SlotsToCoeffsParameters.Scaling == nil {
-		eval.SlotsToCoeffsParameters.Scaling = StCScaling
+	if btpParams.S2C.Scaling == nil {
+		eval.S2C.Scaling = StCScaling
 	} else {
-		eval.SlotsToCoeffsParameters.Scaling.Mul(eval.SlotsToCoeffsParameters.Scaling, StCScaling)
+		eval.S2C.Scaling = new(big.Float).Mul(btpParams.S2C.Scaling, StCScaling)
 	}
 
-	if eval.C2SDFTMatrix, err = hefloat.NewDFTMatrixFromLiteral(params, eval.CoeffsToSlotsParameters, encoder); err != nil {
+	if eval.C2SDFTMatrix, err = hefloat.NewDFTMatrixFromLiteral(params, eval.C2S, encoder); err != nil {
 		return
 	}
 
-	if eval.S2CDFTMatrix, err = hefloat.NewDFTMatrixFromLiteral(params, eval.SlotsToCoeffsParameters, encoder); err != nil {
+	if eval.S2CDFTMatrix, err = hefloat.NewDFTMatrixFromLiteral(params, eval.S2C, encoder); err != nil {
 		return
 	}
 

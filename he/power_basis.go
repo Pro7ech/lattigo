@@ -6,10 +6,10 @@ import (
 	"io"
 	"math/bits"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
-	"github.com/tuneinsight/lattigo/v5/utils/structs"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/bignum"
+	"github.com/Pro7ech/lattigo/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils/structs"
 )
 
 // PowerBasis is a struct storing powers of a ciphertext.
@@ -21,9 +21,9 @@ type PowerBasis struct {
 // NewPowerBasis creates a new PowerBasis. It takes as input a ciphertext
 // and a basis type. The struct treats the input ciphertext as a monomial X and
 // can be used to generates power of this monomial X^{n} in the given BasisType.
-func NewPowerBasis(ct *rlwe.Ciphertext, basis bignum.Basis) (p PowerBasis) {
-	return PowerBasis{
-		Value: map[int]*rlwe.Ciphertext{1: ct.CopyNew()},
+func NewPowerBasis(ct *rlwe.Ciphertext, basis bignum.Basis) (p *PowerBasis) {
+	return &PowerBasis{
+		Value: map[int]*rlwe.Ciphertext{1: ct.Clone()},
 		Basis: basis,
 	}
 }
@@ -77,15 +77,12 @@ func (p *PowerBasis) genPower(n int, lazy, rescale bool, eval Evaluator) (rescal
 
 		a, b := SplitDegree(n)
 
-		// Recurses on the given indexes
-		isPow2 := n&(n-1) == 0
-
 		var rescaleA, rescaleB bool // Avoids calling rescale on already generated powers
 
-		if rescaleA, err = p.genPower(a, lazy && !isPow2, rescale, eval); err != nil {
+		if rescaleA, err = p.genPower(a, lazy, rescale, eval); err != nil {
 			return false, fmt.Errorf("genpower: p.Value[%d]: %w", a, err)
 		}
-		if rescaleB, err = p.genPower(b, lazy && !isPow2, rescale, eval); err != nil {
+		if rescaleB, err = p.genPower(b, lazy, rescale, eval); err != nil {
 			return false, fmt.Errorf("genpower: p.Value[%d]: %w", b, err)
 		}
 

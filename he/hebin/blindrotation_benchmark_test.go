@@ -3,16 +3,15 @@ package hebin
 import (
 	"testing"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 
 	"github.com/stretchr/testify/require"
 )
 
 func BenchmarkHEBin(b *testing.B) {
 
-	b.Run("BlindRotateCore/LogN=(9, 10)/LogQ=(13.6,26.99)/Gadget=2^7", func(b *testing.B) {
+	b.Run("BlindRotateCore/LogN=(9,10)/LogQ=(13.6,26.99)/Gadget=2^7", func(b *testing.B) {
 
 		// RLWE parameters of the BlindRotation
 		// N=1024, Q=0x7fff801 -> 131 bit secure
@@ -34,7 +33,9 @@ func BenchmarkHEBin(b *testing.B) {
 
 		require.NoError(b, err)
 
-		evkParams := rlwe.EvaluationKeyParameters{BaseTwoDecomposition: utils.Pointy(7)}
+		evkParams := rlwe.EvaluationKeyParameters{}
+		evkParams.DigitDecomposition.Type = rlwe.Unsigned
+		evkParams.Log2Basis = 7
 
 		// RLWE secret for the samples
 		skLWE := rlwe.NewKeyGenerator(paramsLWE).GenSecretKeyNew()
@@ -48,15 +49,16 @@ func BenchmarkHEBin(b *testing.B) {
 		// Random LWE mask mod 2N with odd coefficients
 		a := make([]uint64, paramsLWE.N())
 		mask := uint64(2*paramsLWE.N() - 1)
+		r := sampling.NewSource([32]byte{})
 		for i := range a {
-			ai := sampling.RandUint64() & mask
+			ai := r.Uint64() & mask
 			if ai&1 == 0 && ai != 0 {
 				ai ^= 1
 			}
 			a[i] = ai
 		}
 
-		acc := rlwe.NewCiphertext(paramsBR, 1, paramsBR.MaxLevel())
+		acc := rlwe.NewCiphertext(paramsBR, 1, paramsBR.MaxLevel(), -1)
 
 		// Evaluator for the Blind Rotation evaluation
 		eval := NewEvaluator(paramsBR, paramsLWE)

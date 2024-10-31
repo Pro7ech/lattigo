@@ -2,12 +2,12 @@ package he
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/ring/ringqp"
-	"github.com/tuneinsight/lattigo/v5/utils"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils"
 )
 
 // LinearTransformationParameters is a struct storing the parameterization of a
@@ -44,15 +44,20 @@ import (
 //     than their matrix representation by being able to only store the non-zero diagonals.
 //
 // Finally, some metrics about the time and storage complexity of homomorphic linear transformations:
-//   - Storage: #diagonals polynomials mod Q_level * P
+//   - Storage: #diagonals polynomials mod Q * P
 //   - Evaluation: #diagonals multiplications and 2sqrt(#diagonals) ciphertexts rotations.
 type LinearTransformationParameters struct {
-	// DiagonalsIndexList is the list of the non-zero diagonals of the square matrix.
+	// Indexes is the list of the non-zero diagonals of the square matrix.
 	// A non zero diagonals is a diagonal with a least one non-zero element.
-	DiagonalsIndexList []int
+	Indexes []int
 
-	// Level is the level at which to encode the linear transformation.
-	Level int
+	// LevelQ is the level at which to encode the linear transformation.
+	LevelQ int
+
+	// LevelP is the level of the auxliary prime used during the automorphisms
+	// User must ensure that this value is the same as the one used to generate
+	// the evaluation keys used to perform the automorphisms.
+	LevelP int
 
 	// Scale is the plaintext scale at which to encode the linear transformation.
 	Scale rlwe.Scale
@@ -64,54 +69,40 @@ type LinearTransformationParameters struct {
 	// the SIMD packed matrix.
 	LogDimensions ring.Dimensions
 
-	// LogBabyStepGianStepRatio is the log2 of the ratio n1/n2 for n = n1 * n2 and
-	// n is the dimension of the linear transformation. The number of Galois keys required
-	// is minimized when this value is 0 but the overall complexity of the homomorphic evaluation
-	// can be reduced by increasing the ratio (at the expanse of increasing the number of keys required).
-	// If the value returned is negative, then the baby-step giant-step algorithm is not used
-	// and the evaluation complexity (as well as the number of keys) becomes O(n) instead of O(sqrt(n)).
-	LogBabyStepGianStepRatio int
+	// Size of the giant step in the BSGS algorithm. If left to zero, then the optimal
+	// value is derived. If set to -1, then indicates that the naive evaluation should
+	// be used.
+	GiantStep int
 }
 
-type Diagonals[T any] map[int][]T
+// GaloisElements returns the list of Galois elements needed for the evaluation of the linear transformation.
+func (ltParams *LinearTransformationParameters) GaloisElements(params rlwe.ParameterProvider) (galEls []uint64) {
 
-// DiagonalsIndexList returns the list of the non-zero diagonals of the square matrix.
-// A non zero diagonals is a diagonal with a least one non-zero element.
-func (m Diagonals[T]) DiagonalsIndexList() (indexes []int) {
-	indexes = make([]int, 0, len(m))
-	for k := range m {
-		indexes = append(indexes, k)
-	}
-	return indexes
-}
+	p := params.GetRLWEParameters()
 
-// At returns the i-th non-zero diagonal.
-// Method accepts negative values with the equivalency -i = n - i.
-func (m Diagonals[T]) At(i, slots int) ([]T, error) {
+	slots := 1 << ltParams.LogDimensions.Cols
 
-	v, ok := m[i]
+	GiantStep := ltParams.GiantStep
 
-	if !ok {
+	if GiantStep == -1 {
 
-		var j int
-		if i > 0 {
-			j = i - slots
-		} else if j < 0 {
-			j = i + slots
-		} else {
-			return nil, fmt.Errorf("cannot At[0]: diagonal does not exist")
+		_, _, rotN2 := BSGSIndex(ltParams.Indexes, slots, slots)
+
+		galEls = make([]uint64, len(rotN2))
+		for i := range rotN2 {
+			galEls[i] = p.GaloisElement(rotN2[i])
 		}
 
-		v, ok := m[j]
-
-		if !ok {
-			return nil, fmt.Errorf("cannot At[%d or %d]: diagonal does not exist", i, j)
-		}
-
-		return v, nil
+		return
 	}
 
-	return v, nil
+	if GiantStep == 0 {
+		GiantStep = OptimalLinearTransformationGiantStep(ltParams.Indexes, slots)
+	}
+
+	_, rotN1, rotN2 := BSGSIndex(ltParams.Indexes, slots, GiantStep)
+
+	return p.GaloisElements(utils.GetDistincts(append(rotN1, rotN2...)))
 }
 
 // LinearTransformation is a type for linear transformations on ciphertexts.
@@ -119,85 +110,93 @@ func (m Diagonals[T]) At(i, slots int) ([]T, error) {
 // ciphertext using a LinearTransformationEvaluator.
 type LinearTransformation struct {
 	*rlwe.MetaData
-	LogBabyStepGianStepRatio int
-	N1                       int
-	Level                    int
-	Vec                      map[int]ringqp.Poly
+	GiantStep int // If left to zero, indicates naive evaluation.
+	LevelQ    int
+	LevelP    int
+	Vec       map[int]ring.Point
+}
+
+// GetParameters returns the [he.LinearTransformationParameters] of the receiver.
+func (lt LinearTransformation) GetParameters() *LinearTransformationParameters {
+	return &LinearTransformationParameters{
+		Indexes:       slices.Collect(maps.Keys(lt.Vec)),
+		LevelQ:        lt.LevelQ,
+		LevelP:        lt.LevelP,
+		Scale:         lt.Scale,
+		LogDimensions: lt.LogDimensions,
+		GiantStep:     lt.GiantStep,
+	}
 }
 
 // GaloisElements returns the list of Galois elements needed for the evaluation of the linear transformation.
 func (lt LinearTransformation) GaloisElements(params rlwe.ParameterProvider) (galEls []uint64) {
-	return GaloisElementsForLinearTransformation(params, utils.GetKeys(lt.Vec), 1<<lt.LogDimensions.Cols, lt.LogBabyStepGianStepRatio)
+	return lt.GetParameters().GaloisElements(params)
 }
 
 // BSGSIndex returns the BSGSIndex of the target linear transformation.
 func (lt LinearTransformation) BSGSIndex() (index map[int][]int, n1, n2 []int) {
-	return BSGSIndex(utils.GetKeys(lt.Vec), 1<<lt.LogDimensions.Cols, lt.N1)
+	return BSGSIndex(slices.Collect(maps.Keys(lt.Vec)), 1<<lt.LogDimensions.Cols, lt.GiantStep)
 }
 
 // NewLinearTransformation allocates a new LinearTransformation with zero values according to the parameters specified by the LinearTransformationParameters.
-func NewLinearTransformation(params rlwe.ParameterProvider, ltparams LinearTransformationParameters) LinearTransformation {
+func NewLinearTransformation(params rlwe.ParameterProvider, ltparams LinearTransformationParameters) *LinearTransformation {
 
-	p := params.GetRLWEParameters()
-
-	vec := make(map[int]ringqp.Poly)
+	vec := make(map[int]ring.Point)
 	cols := 1 << ltparams.LogDimensions.Cols
-	logBabyStepGianStepRatio := ltparams.LogBabyStepGianStepRatio
-	levelQ := ltparams.Level
-	levelP := p.MaxLevelP()
-	ringQP := p.RingQP().AtLevel(levelQ, levelP)
 
-	diagslislt := ltparams.DiagonalsIndexList
+	N := params.GetRLWEParameters().N()
+	LevelQ := ltparams.LevelQ
+	LevelP := ltparams.LevelP
 
-	var N1 int
-	if logBabyStepGianStepRatio < 0 {
-		N1 = 0
+	diagslislt := ltparams.Indexes
+
+	GiantStep := ltparams.GiantStep
+
+	if GiantStep == -1 {
 		for _, i := range diagslislt {
 			idx := i
 			if idx < 0 {
 				idx += cols
 			}
-			vec[idx] = ringQP.NewPoly()
+			vec[idx] = *ring.NewPoint(N, LevelQ, LevelP)
 		}
 	} else {
-		N1 = FindBestBSGSRatio(diagslislt, cols, logBabyStepGianStepRatio)
-		index, _, _ := BSGSIndex(diagslislt, cols, N1)
+		if GiantStep == 0 {
+			GiantStep = OptimalLinearTransformationGiantStep(diagslislt, cols)
+		}
+		index, _, _ := BSGSIndex(diagslislt, cols, GiantStep)
 		for j := range index {
 			for _, i := range index[j] {
-				vec[j+i] = ringQP.NewPoly()
+				vec[j+i] = *ring.NewPoint(N, LevelQ, LevelP)
 			}
 		}
 	}
 
 	metadata := &rlwe.MetaData{
-		PlaintextMetaData: rlwe.PlaintextMetaData{
-			LogDimensions: ltparams.LogDimensions,
-			Scale:         ltparams.Scale,
-			IsBatched:     true,
-		},
-		CiphertextMetaData: rlwe.CiphertextMetaData{
-			IsNTT:        true,
-			IsMontgomery: true,
-		},
+		LogDimensions: ltparams.LogDimensions,
+		Scale:         ltparams.Scale,
+		IsBatched:     true,
+		IsNTT:         true,
+		IsMontgomery:  true,
 	}
 
-	return LinearTransformation{
-		MetaData:                 metadata,
-		LogBabyStepGianStepRatio: logBabyStepGianStepRatio,
-		N1:                       N1,
-		Level:                    levelQ,
-		Vec:                      vec,
+	return &LinearTransformation{
+		MetaData:  metadata,
+		GiantStep: GiantStep,
+		LevelQ:    ltparams.LevelQ,
+		LevelP:    ltparams.LevelP,
+		Vec:       vec,
 	}
 }
 
 // EncodeLinearTransformation encodes on a pre-allocated LinearTransformation a set of non-zero diagonaes of a matrix representing a linear transformation.
-func EncodeLinearTransformation[T any](encoder Encoder[T, ringqp.Poly], diagonals Diagonals[T], allocated LinearTransformation) (err error) {
+func EncodeLinearTransformation[T any](encoder Encoder, diagonals Diagonals[T], allocated *LinearTransformation) (err error) {
 
 	rows := 1 << allocated.LogDimensions.Rows
 	cols := 1 << allocated.LogDimensions.Cols
-	N1 := allocated.N1
+	GiantStep := allocated.GiantStep
 
-	diags := diagonals.DiagonalsIndexList()
+	diags := diagonals.Indexes()
 
 	buf := make([]T, rows*cols)
 
@@ -207,7 +206,7 @@ func EncodeLinearTransformation[T any](encoder Encoder[T, ringqp.Poly], diagonal
 
 	var v []T
 
-	if N1 == 0 {
+	if GiantStep == -1 {
 		for _, i := range diags {
 
 			idx := i
@@ -223,12 +222,16 @@ func EncodeLinearTransformation[T any](encoder Encoder[T, ringqp.Poly], diagonal
 					return fmt.Errorf("cannot EncodeLinearTransformation: %w", err)
 				}
 
-				if err = rotateAndEncodeDiagonal(v, encoder, 0, metaData, buf, vec); err != nil {
+				if err = encoder.Embed(v, metaData, vec); err != nil {
 					return
 				}
 			}
 		}
 	} else {
+
+		if GiantStep == 0 {
+			return fmt.Errorf("cannot EncodeLinearTransformation: GiantStep == 0 -> invalid initialization")
+		}
 
 		index, _, _ := allocated.BSGSIndex()
 
@@ -246,7 +249,7 @@ func EncodeLinearTransformation[T any](encoder Encoder[T, ringqp.Poly], diagonal
 						return fmt.Errorf("cannot EncodeLinearTransformation: %w", err)
 					}
 
-					if err = rotateAndEncodeDiagonal(v, encoder, rot, metaData, buf, vec); err != nil {
+					if err = encoder.Embed(rotateDiagonal(v, rot, metaData, buf), metaData, vec); err != nil {
 						return
 					}
 				}
@@ -257,14 +260,13 @@ func EncodeLinearTransformation[T any](encoder Encoder[T, ringqp.Poly], diagonal
 	return
 }
 
-func rotateAndEncodeDiagonal[T any](v []T, encoder Encoder[T, ringqp.Poly], rot int, metaData *rlwe.MetaData, buf []T, poly ringqp.Poly) (err error) {
+func rotateDiagonal[T any](v []T, rot int, metaData *rlwe.MetaData, buf []T) (values []T) {
 
 	rows := 1 << metaData.LogDimensions.Rows
 	cols := 1 << metaData.LogDimensions.Cols
 
 	rot &= (cols - 1)
 
-	var values []T
 	if rot != 0 {
 
 		values = buf
@@ -277,55 +279,53 @@ func rotateAndEncodeDiagonal[T any](v []T, encoder Encoder[T, ringqp.Poly], rot 
 		values = v
 	}
 
-	return encoder.Encode(values, metaData, poly)
+	return
 }
 
-// GaloisElementsForLinearTransformation returns the list of Galois elements needed for the evaluation of a linear transformation
-// given the index of its non-zero diagonals, the number of slots in the plaintext and the LogBabyStepGianStepRatio (see LinearTransformationParameters).
-func GaloisElementsForLinearTransformation(params rlwe.ParameterProvider, diags []int, slots, logBabyStepGianStepRatio int) (galEls []uint64) {
+// OptimalLinearTransformationGiantStep returns the giant step that minimize
+// N1 + N2 + |N1 - N2| where:
+// - N1 is the number of giant steps (one rotation per giant step)
+// - N2 is the maximum number of baby steps per giant step (one rotation per baby step)
+func OptimalLinearTransformationGiantStep(nonZeroDiags []int, slots int) (opt int) {
 
-	p := params.GetRLWEParameters()
+	slices.Sort(nonZeroDiags)
 
-	if logBabyStepGianStepRatio < 0 {
-
-		_, _, rotN2 := BSGSIndex(diags, slots, slots)
-
-		galEls = make([]uint64, len(rotN2))
-		for i := range rotN2 {
-			galEls[i] = p.GaloisElement(rotN2[i])
-		}
-
-		return
+	step := nonZeroDiags[1] - nonZeroDiags[0]
+	for i := 1; i < len(nonZeroDiags); i++ {
+		step = min(step, nonZeroDiags[i]-nonZeroDiags[i-1])
 	}
 
-	N1 := FindBestBSGSRatio(diags, slots, logBabyStepGianStepRatio)
+	tot := slots
 
-	_, rotN1, rotN2 := BSGSIndex(diags, slots, N1)
-
-	return p.GaloisElements(utils.GetDistincts(append(rotN1, rotN2...)))
-}
-
-// FindBestBSGSRatio finds the best N1*N2 = N for the baby-step giant-step algorithm for matrix multiplication.
-func FindBestBSGSRatio(nonZeroDiags []int, maxN int, logMaxRatio int) (minN int) {
-
-	maxRatio := float64(int(1 << logMaxRatio))
-
-	for N1 := 1; N1 < maxN; N1 <<= 1 {
-
-		_, rotN1, rotN2 := BSGSIndex(nonZeroDiags, maxN, N1)
-
-		nbN1, nbN2 := len(rotN1)-1, len(rotN2)-1
-
-		if float64(nbN2)/float64(nbN1) == maxRatio {
-			return N1
+	abs := func(x int) (y int) {
+		if x < 0 {
+			return -x
 		}
+		return x
+	}
 
-		if float64(nbN2)/float64(nbN1) > maxRatio {
-			return N1 / 2
+	for i := step; i < slots; i += step {
+		N1, N2 := NumBSGSGalEls(nonZeroDiags, slots, i)
+		if newtot := (N1 + N2) + abs(N1-N2); newtot <= tot {
+			opt = i
+			tot = newtot
 		}
 	}
 
-	return 1
+	return
+}
+
+func NumBSGSGalEls(nonZeroDiags []int, slots, N1 int) (rotN1, rotN2 int) {
+	rotN1Map := make(map[int]bool)
+	rotN2Map := make(map[int]bool)
+	for _, rot := range nonZeroDiags {
+		rot &= (slots - 1)
+		idxN1 := ((rot / N1) * N1) & (slots - 1)
+		idxN2 := rot % N1
+		rotN1Map[idxN1] = true
+		rotN2Map[idxN2] = true
+	}
+	return len(rotN1Map), len(rotN2Map)
 }
 
 // BSGSIndex returns the index map and needed rotation for the BSGS matrix-vector multiplication algorithm.
@@ -337,7 +337,7 @@ func BSGSIndex(nonZeroDiags []int, slots, N1 int) (index map[int][]int, rotN1, r
 	for _, rot := range nonZeroDiags {
 		rot &= (slots - 1)
 		idxN1 := ((rot / N1) * N1) & (slots - 1)
-		idxN2 := rot & (N1 - 1)
+		idxN2 := rot % N1
 		if index[idxN1] == nil {
 			index[idxN1] = []int{idxN2}
 		} else {
@@ -348,8 +348,14 @@ func BSGSIndex(nonZeroDiags []int, slots, N1 int) (index map[int][]int, rotN1, r
 	}
 
 	for k := range index {
-		sort.Ints(index[k])
+		slices.Sort(index[k])
 	}
 
-	return index, utils.GetSortedKeys(rotN1Map), utils.GetSortedKeys(rotN2Map)
+	rotN1 = slices.Collect(maps.Keys(rotN1Map))
+	slices.Sort(rotN1)
+
+	rotN2 = slices.Collect(maps.Keys(rotN2Map))
+	slices.Sort(rotN2)
+
+	return
 }

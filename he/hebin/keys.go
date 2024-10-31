@@ -3,10 +3,10 @@ package hebin
 import (
 	"math/big"
 
-	"github.com/tuneinsight/lattigo/v5/core/rgsw"
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
+	"github.com/Pro7ech/lattigo/rgsw"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils"
 )
 
 const (
@@ -48,18 +48,15 @@ func GenEvaluationKeyNew(paramsRLWE rlwe.ParameterProvider, skRLWE *rlwe.SecretK
 	pRLWE := *paramsRLWE.GetRLWEParameters()
 	pLWE := *paramsLWE.GetRLWEParameters()
 
-	skLWECopy := skLWE.CopyNew()
-	pLWE.RingQ().AtLevel(0).INTT(skLWECopy.Value.Q, skLWECopy.Value.Q)
-	pLWE.RingQ().AtLevel(0).IMForm(skLWECopy.Value.Q, skLWECopy.Value.Q)
-	sk := make([]*big.Int, pLWE.N())
-	for i := range sk {
-		sk[i] = new(big.Int)
-	}
-	pLWE.RingQ().AtLevel(0).PolyToBigintCentered(skLWECopy.Value.Q, 1, sk)
+	skLWECopy := skLWE.Clone()
+	pLWE.RingQ().AtLevel(0).INTT(skLWECopy.Q, skLWECopy.Q)
+	pLWE.RingQ().AtLevel(0).IMForm(skLWECopy.Q, skLWECopy.Q)
+	sk := make([]big.Int, pLWE.N())
+	pLWE.RingQ().AtLevel(0).PolyToBigintCentered(skLWECopy.Q, 1, sk)
 
 	encryptor := rgsw.NewEncryptor(pRLWE, skRLWE)
 
-	levelQ, levelP, BaseTwoDecomposition := rlwe.ResolveEvaluationKeyParameters(pRLWE, evkParams)
+	levelQ, levelP, dd := rlwe.ResolveEvaluationKeyParameters(pRLWE, evkParams)
 
 	skiRGSW := make([]*rgsw.Ciphertext, pLWE.N())
 
@@ -72,15 +69,16 @@ func GenEvaluationKeyNew(paramsRLWE rlwe.ParameterProvider, skRLWE *rlwe.SecretK
 		if _, ok := ptXi[siInt]; !ok {
 
 			pt := &rlwe.Plaintext{}
+			pt.Point = &ring.Point{}
 			pt.MetaData = &rlwe.MetaData{}
 			pt.IsNTT = true
-			pt.Value = pRLWE.RingQ().NewMonomialXi(siInt)
-			pRLWE.RingQ().NTT(pt.Value, pt.Value)
+			pt.Q = pRLWE.RingQ().NewMonomialXi(siInt)
+			pRLWE.RingQ().NTT(pt.Q, pt.Q)
 
 			ptXi[siInt] = pt
 		}
 
-		skiRGSW[i] = rgsw.NewCiphertext(pRLWE, levelQ, levelP, BaseTwoDecomposition)
+		skiRGSW[i] = rgsw.NewCiphertext(pRLWE, levelQ, levelP, dd)
 
 		// Sanity check, this error should never happen unless this algorithm
 		// has been improperly modified to provides invalid inputs.
@@ -99,9 +97,9 @@ func GenEvaluationKeyNew(paramsRLWE rlwe.ParameterProvider, skRLWE *rlwe.SecretK
 	galEls = append(galEls, pRLWE.RingQ().NthRoot()-ring.GaloisGen)
 
 	gks := kgen.GenGaloisKeysNew(galEls, skRLWE, rlwe.EvaluationKeyParameters{
-		LevelQ:               utils.Pointy(levelQ),
-		LevelP:               utils.Pointy(levelP),
-		BaseTwoDecomposition: utils.Pointy(BaseTwoDecomposition),
+		LevelQ:             utils.Pointy(levelQ),
+		LevelP:             utils.Pointy(levelP),
+		DigitDecomposition: dd,
 	})
 
 	return MemBlindRotationEvaluationKeySet{BlindRotationKeys: skiRGSW, AutomorphismKeys: gks}

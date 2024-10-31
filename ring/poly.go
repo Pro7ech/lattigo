@@ -1,102 +1,61 @@
 package ring
 
 import (
-	"bufio"
+	"fmt"
 	"io"
 
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
-	"github.com/tuneinsight/lattigo/v5/utils/structs"
+	"github.com/Pro7ech/lattigo/utils/structs"
 )
 
-// Poly is the structure that contains the coefficients of a polynomial.
-type Poly struct {
-	Coeffs structs.Matrix[uint64]
+// Poly is a structure storing the coefficients of a polynomial.
+type Poly []uint64
+
+// BufferSize returns the minimum buffer size
+// to instantiate the receiver through [FromBuffer].
+func (p Poly) BufferSize(N int) int {
+	return N
 }
 
-// NewPoly creates a new polynomial with N coefficients set to zero and Level+1 moduli.
-func NewPoly(N, Level int) (pol Poly) {
-	Coeffs := make([][]uint64, Level+1)
-	for i := range Coeffs {
-		Coeffs[i] = make([]uint64, N)
+// FromBuffer assigns new backing array to the receiver.
+func (p *Poly) FromBuffer(N int, buf []uint64) {
+
+	if len(buf) < p.BufferSize(N) {
+		panic(fmt.Errorf("invalid buffer size: N=%d < len(p)=%d", N, len(buf)))
 	}
-	return Poly{Coeffs: Coeffs}
+
+	*p = make([]uint64, N)
 }
 
-// Resize resizes the level of the target polynomial to the provided level.
-// If the provided level is larger than the current level, then allocates zero
-// coefficients, otherwise dereferences the coefficients above the provided level.
-func (pol *Poly) Resize(level int) {
-	N := pol.N()
-	if pol.Level() > level {
-		pol.Coeffs = pol.Coeffs[:level+1]
-	} else if level > pol.Level() {
-		prevLevel := pol.Level()
-		pol.Coeffs = append(pol.Coeffs, make([][]uint64, level-prevLevel)...)
-		for i := prevLevel + 1; i < level+1; i++ {
-			pol.Coeffs[i] = make([]uint64, N)
-		}
-	}
+// NewPoly allocates a new [Poly] of N coefficients.
+func NewPoly(N int) (p Poly) {
+	p.FromBuffer(N, make([]uint64, p.BufferSize(N)))
+	return
 }
 
-// N returns the number of coefficients of the polynomial, which equals the degree of the Ring cyclotomic polynomial.
-func (pol Poly) N() int {
-	if len(pol.Coeffs) == 0 {
-		return 0
-	}
-	return len(pol.Coeffs[0])
+// N returns the number of coefficients of the [Poly].
+func (p Poly) N() int {
+	return len(p)
 }
 
-// Level returns the current number of moduli minus 1.
-func (pol Poly) Level() int {
-	return len(pol.Coeffs) - 1
+// Clone returns a deep copy of the receiver.
+func (p Poly) Clone() *Poly {
+	pCpy := Poly(structs.Vector[uint64](p).Clone())
+	return &pCpy
 }
 
-// Zero sets all coefficients of the target polynomial to 0.
-func (pol Poly) Zero() {
-	for i := range pol.Coeffs {
-		ZeroVec(pol.Coeffs[i])
-	}
+// Copy copies the coefficients of on the receiver.
+func (p *Poly) Copy(other *Poly) {
+	copy(*p, *other)
 }
 
-// CopyNew creates an exact copy of the target polynomial.
-func (pol Poly) CopyNew() *Poly {
-	return &Poly{
-		Coeffs: pol.Coeffs.CopyNew(),
-	}
-}
-
-// Copy copies the coefficients of p1 on the target polynomial.
-// This method does nothing if the underlying arrays are the same.
-// This method will resize the target polynomial to the level of
-// the input polynomial.
-func (pol *Poly) Copy(p1 Poly) {
-	pol.Resize(p1.Level())
-	pol.CopyLvl(p1.Level(), p1)
-}
-
-// CopyLvl copies the coefficients of p1 on the target polynomial.
-// This method does nothing if the underlying arrays are the same.
-// Expects the degree of both polynomials to be identical.
-func (pol *Poly) CopyLvl(level int, p1 Poly) {
-	for i := 0; i < level+1; i++ {
-		if !utils.Alias1D(pol.Coeffs[i], p1.Coeffs[i]) {
-			copy(pol.Coeffs[i], p1.Coeffs[i])
-		}
-	}
-}
-
-// Equal returns true if the receiver Poly is equal to the provided other Poly.
-// This function checks for strict equality between the polynomial coefficients
-// (i.e., it does not consider congruence as equality within the ring like
-// `Ring.Equal` does).
-func (pol Poly) Equal(other *Poly) bool {
-	return pol.Coeffs.Equal(other.Coeffs)
+// Equal performs a deep equal.
+func (p Poly) Equal(other *Poly) bool {
+	return structs.Vector[uint64](p).Equal(structs.Vector[uint64](*other))
 }
 
 // BinarySize returns the serialized size of the object in bytes.
-func (pol Poly) BinarySize() (size int) {
-	return pol.Coeffs.BinarySize()
+func (p Poly) BinarySize() (size int) {
+	return structs.Vector[uint64](p).BinarySize()
 }
 
 // WriteTo writes the object on an io.Writer. It implements the io.WriterTo
@@ -110,16 +69,8 @@ func (pol Poly) BinarySize() (size int) {
 //     io.Writer in a pre-allocated bufio.Writer.
 //   - When writing to a pre-allocated var b []byte, it is preferable to pass
 //     buffer.NewBuffer(b) as w (see lattigo/utils/buffer/buffer.go).
-func (pol Poly) WriteTo(w io.Writer) (n int64, err error) {
-	switch w := w.(type) {
-	case buffer.Writer:
-		if n, err = pol.Coeffs.WriteTo(w); err != nil {
-			return
-		}
-		return n, w.Flush()
-	default:
-		return pol.WriteTo(bufio.NewWriter(w))
-	}
+func (p Poly) WriteTo(w io.Writer) (n int64, err error) {
+	return structs.Vector[uint64](p).WriteTo(w)
 }
 
 // ReadFrom reads on the object from an io.Writer. It implements the
@@ -133,28 +84,27 @@ func (pol Poly) WriteTo(w io.Writer) (n int64, err error) {
 //     first wrap io.Reader in a pre-allocated bufio.Reader.
 //   - When reading from a var b []byte, it is preferable to pass a buffer.NewBuffer(b)
 //     as w (see lattigo/utils/buffer/buffer.go).
-func (pol *Poly) ReadFrom(r io.Reader) (n int64, err error) {
-	switch r := r.(type) {
-	case buffer.Reader:
-		if n, err = pol.Coeffs.ReadFrom(r); err != nil {
-			return
-		}
-		return n, nil
-	default:
-		return pol.ReadFrom(bufio.NewReader(r))
+func (p *Poly) ReadFrom(r io.Reader) (n int64, err error) {
+	v := structs.Vector[uint64](*p)
+	if n, err = v.ReadFrom(r); err != nil {
+		return
 	}
+	*p = []uint64(v)
+	return
 }
 
 // MarshalBinary encodes the object into a binary form on a newly allocated slice of bytes.
-func (pol Poly) MarshalBinary() (p []byte, err error) {
-	buf := buffer.NewBufferSize(pol.BinarySize())
-	_, err = pol.WriteTo(buf)
-	return buf.Bytes(), err
+func (p Poly) MarshalBinary() (data []byte, err error) {
+	return structs.Vector[uint64](p).MarshalBinary()
 }
 
 // UnmarshalBinary decodes a slice of bytes generated by
 // MarshalBinary or WriteTo on the object.
-func (pol *Poly) UnmarshalBinary(p []byte) (err error) {
-	_, err = pol.ReadFrom(buffer.NewBuffer(p))
+func (p *Poly) UnmarshalBinary(data []byte) (err error) {
+	v := structs.Vector[uint64](*p)
+	if err = v.UnmarshalBinary(data); err != nil {
+		return
+	}
+	*p = []uint64(v)
 	return
 }

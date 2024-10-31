@@ -8,7 +8,7 @@ type Parameters struct {
 }
 
 var testParameters = []Parameters{
-	{10, Qi60[len(Qi60)-14:], Pi60[len(Pi60)-14:]},
+	{14, Qi60[:12], Pi60[:3]},
 }
 
 // Qi60 are the first [0:32] 61-bit close to 2^{62} NTT-friendly primes for N up to 2^{17}

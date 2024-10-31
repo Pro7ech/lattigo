@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 )
 
@@ -43,7 +44,7 @@ func NewInt(x interface{}) (y *big.Int) {
 func RandInt(reader io.Reader, max *big.Int) (n *big.Int) {
 	var err error
 	if n, err = rand.Int(reader, max); err != nil {
-		panic("error: crypto/rand/bigint")
+		panic(fmt.Errorf("rand.Int: %w", err))
 	}
 	return
 }
@@ -61,4 +62,36 @@ func DivRound(a, b, i *big.Int) {
 			i.Sub(i, NewInt(1))
 		}
 	}
+}
+
+func Stats(values []big.Int, prec uint) [2]float64 {
+
+	N := len(values)
+
+	mean := NewFloat(0, prec)
+	tmp := NewFloat(0, prec)
+
+	for i := 0; i < N; i++ {
+		mean.Add(mean, tmp.SetInt(&values[i]))
+	}
+
+	mean.Quo(mean, NewFloat(float64(N), prec))
+
+	stdFloat := NewFloat(0, prec)
+
+	for i := 0; i < N; i++ {
+		tmp.SetInt(&values[i])
+		tmp.Sub(tmp, mean)
+		tmp.Mul(tmp, tmp)
+		stdFloat.Add(stdFloat, tmp)
+	}
+
+	stdFloat.Quo(stdFloat, NewFloat(float64(N-1), prec))
+
+	stdFloat.Sqrt(stdFloat)
+
+	stdF64, _ := stdFloat.Float64()
+	meanF64, _ := mean.Float64()
+
+	return [2]float64{math.Log2(stdF64), meanF64}
 }

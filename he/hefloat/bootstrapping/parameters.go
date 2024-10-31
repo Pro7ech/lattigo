@@ -1,32 +1,32 @@
 package bootstrapping
 
 import (
-	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/schemes/ckks"
-	"github.com/tuneinsight/lattigo/v5/utils"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/ring"
 )
 
 // Parameters is a struct storing the parameters
 // of the bootstrapping circuit.
 type Parameters struct {
+	EvalRound bool
 	// ResidualParameters: Parameters outside of the bootstrapping circuit
 	ResidualParameters hefloat.Parameters
 	// BootstrappingParameters: Parameters during the bootstrapping circuit
 	BootstrappingParameters hefloat.Parameters
-	// SlotsToCoeffsParameters Parameters of the homomorphic decoding linear transformation
-	SlotsToCoeffsParameters hefloat.DFTMatrixLiteral
-	// Mod1ParametersLiteral: Parameters of the homomorphic modular reduction
-	Mod1ParametersLiteral hefloat.Mod1ParametersLiteral
-	// CoeffsToSlotsParameters: Parameters of the homomorphic encoding linear transformation
-	CoeffsToSlotsParameters hefloat.DFTMatrixLiteral
-	// IterationsParameters: Parameters of the bootstrapping iterations (META-BTS)
-	IterationsParameters *IterationsParameters
+	// S2C Parameters of the homomorphic decoding linear transformation
+	S2C hefloat.DFTMatrixLiteral
+	// Mod1: Parameters of the homomorphic modular reduction
+	Mod1 hefloat.Mod1ParametersLiteral
+	// C2S: Parameters of the homomorphic encoding linear transformation
+	C2S hefloat.DFTMatrixLiteral
+	// Iterations: Parameters of the bootstrapping iterations (META-BTS)
+	Iterations Iterations
 	// EphemeralSecretWeight: Hamming weight of the ephemeral secret. If 0, no ephemeral secret is used during the bootstrapping.
 	EphemeralSecretWeight int
 	// CircuitOrder: Value indicating the order of the circuit (default: ModUpThenEncode)
@@ -49,10 +49,14 @@ type Parameters struct {
 // the provided residualParameters and the information given in the bootstrapping.ParametersLiteral.
 func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit ParametersLiteral) (Parameters, error) {
 
+	if !btpLit.Initialized {
+		return Parameters{}, fmt.Errorf("[bootstrapping.ParametersLiteral] have not been initialized")
+	}
+
 	var err error
 
 	// Retrieve the LogN of the bootstrapping circuit
-	LogN := btpLit.GetLogN()
+	LogN := btpLit.LogN
 
 	// Retrieve the NthRoot
 	var NthRoot uint64
@@ -66,7 +70,7 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 		}
 
 		// Takes the greatest NthRoot between the residualParameters NthRoot and the bootstrapping NthRoot
-		NthRoot = utils.Max(uint64(residualParameters.N()<<2), uint64(2<<LogN))
+		NthRoot = max(uint64(residualParameters.N()<<2), uint64(2<<LogN))
 
 	default:
 
@@ -76,7 +80,7 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 		}
 
 		// Takes the greatest NthRoot between the residualParameters NthRoot and the bootstrapping NthRoot
-		NthRoot = utils.Max(uint64(residualParameters.N()<<1), uint64(2<<LogN))
+		NthRoot = max(uint64(residualParameters.N()<<1), uint64(2<<LogN))
 	}
 
 	// Checks that all primes Qi of the residualParameters are congruent to 1 mod NthRoot of the bootstrapping parameters.
@@ -86,157 +90,41 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 		}
 	}
 
-	// Retrieves the variable LogSlots, which is used to instantiates the encoding/decoding matrices.
-	var LogSlots int
-	if LogSlots, err = btpLit.GetLogSlots(); err != nil {
-		return Parameters{}, err
+	if btpLit.LogSlots >= btpLit.LogN {
+		return Parameters{}, fmt.Errorf("cannot NewParametersFromLiteral: LogSlots >= LogN")
 	}
 
-	// Retrieves the factorization depth and scaling factor of the encoding matrix
-	var CoeffsToSlotsFactorizationDepthAndLogScales [][]int
-	if CoeffsToSlotsFactorizationDepthAndLogScales, err = btpLit.GetCoeffsToSlotsFactorizationDepthAndLogScales(LogSlots); err != nil {
-		return Parameters{}, err
-	}
-
-	// Retrieves the factorization depth and scaling factor of the decoding matrix
-	var SlotsToCoeffsFactorizationDepthAndLogScales [][]int
-	if SlotsToCoeffsFactorizationDepthAndLogScales, err = btpLit.GetSlotsToCoeffsFactorizationDepthAndLogScales(LogSlots); err != nil {
-		return Parameters{}, err
-	}
-
-	// Slots To Coeffs params
-	SlotsToCoeffsLevels := make([]int, len(SlotsToCoeffsFactorizationDepthAndLogScales))
-	for i := range SlotsToCoeffsLevels {
-		SlotsToCoeffsLevels[i] = len(SlotsToCoeffsFactorizationDepthAndLogScales[i])
-	}
-
-	// Number of bootstrapping iterations
-	var iterParams *IterationsParameters
-	if iterParams, err = btpLit.GetIterationsParameters(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Boolean if there is a reserved prime for the bootstrapping iterations
-	var hasReservedIterationPrime int
-	if iterParams != nil && iterParams.ReservedPrimeBitSize > 0 {
-		hasReservedIterationPrime = 1
-	}
-
-	// SlotsToCoeffs parameters (homomorphic decoding)
-	S2CParams := hefloat.DFTMatrixLiteral{
-		Type:         hefloat.HomomorphicDecode,
-		LogSlots:     LogSlots,
-		Format:       hefloat.RepackImagAsReal,
-		LevelStart:   residualParameters.MaxLevel() + len(SlotsToCoeffsFactorizationDepthAndLogScales) + hasReservedIterationPrime,
-		LogBSGSRatio: 1,
-		Levels:       SlotsToCoeffsLevels,
-	}
-
-	// Scaling factor of the homomorphic modular reduction x mod 1
-	var EvalMod1LogScale int
-	if EvalMod1LogScale, err = btpLit.GetEvalMod1LogScale(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Type of polynomial approximation of x mod 1
-	Mod1Type := btpLit.GetMod1Type()
-
-	// Degree of the taylor series of arc sine
-	var Mod1InvDegree int
-	if Mod1InvDegree, err = btpLit.GetMod1InvDegree(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Log2 ratio between Q[0] and |m| (i.e. gap between the message and Q[0])
-	var LogMessageRatio int
-	if LogMessageRatio, err = btpLit.GetLogMessageRatio(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Interval [-K+1, K-1] of the polynomial approximation of x mod 1
-	var K int
-	if K, err = btpLit.GetK(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Number of double angle evaluation if x mod 1 is approximated with cos
-	var DoubleAngle int
-	if DoubleAngle, err = btpLit.GetDoubleAngle(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Degree of the polynomial approximation of x mod 1
-	var Mod1Degree int
-	if Mod1Degree, err = btpLit.GetMod1Degree(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Parameters of the homomorphic modular reduction x mod 1
-	Mod1ParametersLiteral := hefloat.Mod1ParametersLiteral{
-		LogScale:        EvalMod1LogScale,
-		Mod1Type:        Mod1Type,
-		Mod1Degree:      Mod1Degree,
-		DoubleAngle:     DoubleAngle,
-		K:               K,
-		LogMessageRatio: LogMessageRatio,
-		Mod1InvDegree:   Mod1InvDegree,
-	}
-
-	// Hamming weight of the ephemeral secret key to which the ciphertext is
-	// switched to during the ModUp step.
-	var EphemeralSecretWeight int
-	if EphemeralSecretWeight, err = btpLit.GetEphemeralSecretWeight(); err != nil {
-		return Parameters{}, err
-	}
-
-	// Coeffs To Slots params
-	Mod1ParametersLiteral.LevelStart = S2CParams.LevelStart + Mod1ParametersLiteral.Depth()
-
-	CoeffsToSlotsLevels := make([]int, len(CoeffsToSlotsFactorizationDepthAndLogScales))
-	for i := range CoeffsToSlotsLevels {
-		CoeffsToSlotsLevels[i] = len(CoeffsToSlotsFactorizationDepthAndLogScales[i])
-	}
-
-	// Parameters of the CoeffsToSlots (homomorphic encoding)
-	C2SParams := hefloat.DFTMatrixLiteral{
-		Type:         hefloat.HomomorphicEncode,
-		Format:       hefloat.RepackImagAsReal,
-		LogSlots:     LogSlots,
-		LevelStart:   Mod1ParametersLiteral.LevelStart + len(CoeffsToSlotsFactorizationDepthAndLogScales),
-		LogBSGSRatio: 1,
-		Levels:       CoeffsToSlotsLevels,
-	}
+	// Circuit parameters literal
+	C2SParams, S2CParams, Mod1Params := btpLit.GetCircuitParametersLiteral(residualParameters)
 
 	// List of the prime-size of all primes required by the bootstrapping circuit.
 	LogQBootstrappingCircuit := []int{}
 
 	// appends the reserved prime first for multiple iteration, if any
-	if hasReservedIterationPrime == 1 {
-		LogQBootstrappingCircuit = append(LogQBootstrappingCircuit, iterParams.ReservedPrimeBitSize)
+	if btpLit.Iterations.ReservedPrimeBitSize != 0 {
+		LogQBootstrappingCircuit = append(LogQBootstrappingCircuit, btpLit.Iterations.ReservedPrimeBitSize)
 	}
 
 	// Appends all other primes in reverse order of the circuit
-	for i := range SlotsToCoeffsFactorizationDepthAndLogScales {
+	for i := range btpLit.S2C {
 		var qi int
-		for j := range SlotsToCoeffsFactorizationDepthAndLogScales[i] {
-			qi += SlotsToCoeffsFactorizationDepthAndLogScales[i][j]
+		for _, qj := range btpLit.S2C[i] {
+			qi += qj
 		}
-
 		if qi+residualParameters.LogDefaultScale() < 61 {
 			qi += residualParameters.LogDefaultScale()
 		}
-
 		LogQBootstrappingCircuit = append(LogQBootstrappingCircuit, qi)
 	}
 
-	for i := 0; i < Mod1ParametersLiteral.Depth(); i++ {
-		LogQBootstrappingCircuit = append(LogQBootstrappingCircuit, EvalMod1LogScale)
+	for i := 0; i < Mod1Params.Depth(); i++ {
+		LogQBootstrappingCircuit = append(LogQBootstrappingCircuit, Mod1Params.LogScale)
 	}
 
-	for i := range CoeffsToSlotsFactorizationDepthAndLogScales {
+	for i := range btpLit.C2S {
 		var qi int
-		for j := range CoeffsToSlotsFactorizationDepthAndLogScales[i] {
-			qi += CoeffsToSlotsFactorizationDepthAndLogScales[i][j]
+		for _, qj := range btpLit.C2S[i] {
+			qi += qj
 		}
 		LogQBootstrappingCircuit = append(LogQBootstrappingCircuit, qi)
 	}
@@ -258,10 +146,14 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 
 	// Retrieve the number of primes #Pi of the bootstrapping circuit
 	// and adds them to the list of bit-size
-	LogP := btpLit.GetLogP(C2SParams.LevelStart + 1)
-	for _, logpi := range LogP {
-		primesBitLenNew[logpi]++
+	LogP := btpLit.LogP
+
+	for _, logpj := range LogP {
+		primesBitLenNew[logpj]++
 	}
+
+	S2CParams.LevelP = len(LogP) - 1
+	C2SParams.LevelP = len(LogP) - 1
 
 	// Map to store [bit-size][]primes
 	primesNew := map[int][]uint64{}
@@ -313,13 +205,13 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 		primesNew[logpi] = primesNew[logpi][1:]
 	}
 
-	// Ensure that ckks.PrecisionMode = PREC64 when using PREC128 residual parameters.
+	// Ensure that hefloat.PrecisionMode = PREC64 when using PREC128 residual parameters.
 	var LogDefaultScale int
 	switch residualParameters.PrecisionMode() {
-	case ckks.PREC64:
+	case hefloat.PREC64:
 		LogDefaultScale = residualParameters.LogDefaultScale()
-	case ckks.PREC128:
-		LogDefaultScale = residualParameters.LogQi()[0] - LogMessageRatio
+	case hefloat.PREC128:
+		LogDefaultScale = residualParameters.LogQi()[0] - btpLit.LogMessageRatio
 	}
 
 	// Instantiates the hefloat.Parameters of the bootstrapping circuit.
@@ -328,8 +220,8 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 		Q:               Q,
 		P:               P,
 		LogDefaultScale: LogDefaultScale,
-		Xs:              btpLit.GetDefaultXs(),
-		Xe:              btpLit.GetDefaultXe(),
+		Xs:              btpLit.Xs,
+		Xe:              btpLit.Xe,
 	})
 
 	if err != nil {
@@ -337,113 +229,81 @@ func NewParametersFromLiteral(residualParameters hefloat.Parameters, btpLit Para
 	}
 
 	return Parameters{
+		EvalRound:               btpLit.EvalRound,
 		ResidualParameters:      residualParameters,
 		BootstrappingParameters: params,
-		EphemeralSecretWeight:   EphemeralSecretWeight,
-		SlotsToCoeffsParameters: S2CParams,
-		Mod1ParametersLiteral:   Mod1ParametersLiteral,
-		CoeffsToSlotsParameters: C2SParams,
-		IterationsParameters:    iterParams,
+		EphemeralSecretWeight:   btpLit.EphemeralSecretWeight,
+		S2C:                     S2CParams,
+		Mod1:                    Mod1Params,
+		C2S:                     C2SParams,
+		Iterations:              btpLit.Iterations,
 	}, nil
+}
+
+// GetC2SBypass returns the [hefloat.DFTMatrixLiteral] of the high precision
+// CoeffsToSlots bypass for the EvalRound+ approach.
+// See https://eprint.iacr.org/2024/1379).
+func (p Parameters) GetC2SBypass() hefloat.DFTMatrixLiteral {
+
+	LogSlots := p.C2S.LogSlots
+
+	// At least 1, at most p.Mod1.Depth(), if possible LogSlots.
+	C2SBypassDepth := min(p.Mod1.Depth(), max(LogSlots, 1))
+
+	C2SBypassLevels := make([]int, C2SBypassDepth)
+	for i := range C2SBypassLevels {
+		C2SBypassLevels[i] = 1
+	}
+
+	return hefloat.DFTMatrixLiteral{
+		Type:     hefloat.HomomorphicEncode,
+		Format:   hefloat.RepackImagAsReal,
+		LogSlots: LogSlots,
+		LevelQ:   p.S2C.LevelQ + C2SBypassDepth,
+		LevelP:   p.C2S.LevelP,
+		Levels:   C2SBypassLevels,
+	}
 }
 
 func (p Parameters) Equal(other *Parameters) (res bool) {
 	res = p.ResidualParameters.Equal(&other.ResidualParameters)
 	res = res && p.BootstrappingParameters.Equal(&other.BootstrappingParameters)
 	res = res && p.EphemeralSecretWeight == other.EphemeralSecretWeight
-	res = res && cmp.Equal(p.SlotsToCoeffsParameters, other.SlotsToCoeffsParameters)
-	res = res && cmp.Equal(p.Mod1ParametersLiteral, other.Mod1ParametersLiteral)
-	res = res && cmp.Equal(p.CoeffsToSlotsParameters, other.CoeffsToSlotsParameters)
-	res = res && cmp.Equal(p.IterationsParameters, other.IterationsParameters)
+	res = res && cmp.Equal(p.S2C, other.S2C)
+	res = res && cmp.Equal(p.Mod1, other.Mod1)
+	res = res && cmp.Equal(p.C2S, other.C2S)
+	res = res && cmp.Equal(p.Iterations, other.Iterations)
 	return
 }
 
 // LogMaxDimensions returns the log plaintext dimensions of the target Parameters.
 func (p Parameters) LogMaxDimensions() ring.Dimensions {
-	return ring.Dimensions{Rows: 0, Cols: p.SlotsToCoeffsParameters.LogSlots}
+	return ring.Dimensions{Rows: 0, Cols: p.C2S.LogSlots}
 }
 
 // LogMaxSlots returns the log of the maximum number of slots.
 func (p Parameters) LogMaxSlots() int {
-	return p.SlotsToCoeffsParameters.LogSlots
+	return p.C2S.LogSlots
 }
 
-// DepthCoeffsToSlots returns the depth of the Coeffs to Slots of the bootstrapping.
-func (p Parameters) DepthCoeffsToSlots() (depth int) {
-	return p.SlotsToCoeffsParameters.Depth(true)
+// C2SDepth returns the depth of the Coeffs to Slots of the bootstrapping.
+func (p Parameters) C2SDepth() (depth int) {
+	return p.C2S.Depth(true)
 }
 
-// DepthEvalMod returns the depth of the EvalMod step of the bootstrapping.
-func (p Parameters) DepthEvalMod() (depth int) {
-	return p.Mod1ParametersLiteral.Depth()
+// Mod1Depth returns the depth of the EvalMod step of the bootstrapping.
+func (p Parameters) Mod1Depth() (depth int) {
+	return p.Mod1.Depth()
 }
 
-// DepthSlotsToCoeffs returns the depth of the Slots to Coeffs step of the bootstrapping.
-func (p Parameters) DepthSlotsToCoeffs() (depth int) {
-	return p.CoeffsToSlotsParameters.Depth(true)
+// S2CDepth returns the depth of the Slots to Coeffs step of the bootstrapping.
+func (p Parameters) S2CDepth() (depth int) {
+	return p.C2S.Depth(true)
 }
 
 // Depth returns the depth of the full bootstrapping circuit.
 func (p Parameters) Depth() (depth int) {
-	return p.DepthCoeffsToSlots() + p.DepthEvalMod() + p.DepthSlotsToCoeffs()
-}
-
-// MarshalBinary returns a JSON representation of the Parameters struct.
-// See `Marshal` from the `encoding/json` package.
-func (p Parameters) MarshalBinary() (data []byte, err error) {
-	return json.Marshal(p)
-}
-
-// UnmarshalBinary reads a JSON representation on the target Parameters struct.
-// See `Unmarshal` from the `encoding/json` package.
-func (p *Parameters) UnmarshalBinary(data []byte) (err error) {
-	return json.Unmarshal(data, p)
-}
-
-func (p Parameters) MarshalJSON() (data []byte, err error) {
-	return json.Marshal(struct {
-		ResidualParameters      hefloat.Parameters
-		BootstrappingParameters hefloat.Parameters
-		SlotsToCoeffsParameters hefloat.DFTMatrixLiteral
-		Mod1ParametersLiteral   hefloat.Mod1ParametersLiteral
-		CoeffsToSlotsParameters hefloat.DFTMatrixLiteral
-		IterationsParameters    *IterationsParameters
-		EphemeralSecretWeight   int
-	}{
-		ResidualParameters:      p.ResidualParameters,
-		BootstrappingParameters: p.BootstrappingParameters,
-		SlotsToCoeffsParameters: p.SlotsToCoeffsParameters,
-		Mod1ParametersLiteral:   p.Mod1ParametersLiteral,
-		CoeffsToSlotsParameters: p.CoeffsToSlotsParameters,
-		IterationsParameters:    p.IterationsParameters,
-		EphemeralSecretWeight:   p.EphemeralSecretWeight,
-	})
-}
-
-func (p *Parameters) UnmarshalJSON(data []byte) (err error) {
-	var params struct {
-		ResidualParameters      hefloat.Parameters
-		BootstrappingParameters hefloat.Parameters
-		SlotsToCoeffsParameters hefloat.DFTMatrixLiteral
-		Mod1ParametersLiteral   hefloat.Mod1ParametersLiteral
-		CoeffsToSlotsParameters hefloat.DFTMatrixLiteral
-		IterationsParameters    *IterationsParameters
-		EphemeralSecretWeight   int
-	}
-
-	if err = json.Unmarshal(data, &params); err != nil {
-		return
-	}
-
-	p.ResidualParameters = params.ResidualParameters
-	p.BootstrappingParameters = params.BootstrappingParameters
-	p.SlotsToCoeffsParameters = params.SlotsToCoeffsParameters
-	p.Mod1ParametersLiteral = params.Mod1ParametersLiteral
-	p.CoeffsToSlotsParameters = params.CoeffsToSlotsParameters
-	p.IterationsParameters = params.IterationsParameters
-	p.EphemeralSecretWeight = params.EphemeralSecretWeight
-
-	return
+	return p.C2SDepth() + p.Mod1Depth() + p.S2CDepth()
 }
 
 // GaloisElements returns the list of Galois elements required to evaluate the bootstrapping.
@@ -452,22 +312,28 @@ func (p Parameters) GaloisElements(params hefloat.Parameters) (galEls []uint64) 
 	logN := params.LogN()
 
 	// List of the rotation key values to needed for the bootstrap
-	keys := make(map[uint64]bool)
+	m := make(map[uint64]bool)
 
 	//SubSum rotation needed X -> Y^slots rotations
 	for i := p.LogMaxDimensions().Cols; i < logN-1; i++ {
-		keys[params.GaloisElement(1<<i)] = true
+		m[params.GaloisElement(1<<i)] = true
 	}
 
-	for _, galEl := range p.CoeffsToSlotsParameters.GaloisElements(params) {
-		keys[galEl] = true
+	for _, galEl := range p.C2S.GaloisElements(params) {
+		m[galEl] = true
 	}
 
-	for _, galEl := range p.SlotsToCoeffsParameters.GaloisElements(params) {
-		keys[galEl] = true
+	if p.EvalRound {
+		for _, galEl := range p.GetC2SBypass().GaloisElements(params) {
+			m[galEl] = true
+		}
 	}
 
-	keys[params.GaloisElementForComplexConjugation()] = true
+	for _, galEl := range p.S2C.GaloisElements(params) {
+		m[galEl] = true
+	}
 
-	return utils.GetSortedKeys(keys)
+	m[params.GaloisElementForComplexConjugation()] = true
+
+	return slices.Sorted(maps.Keys(m))
 }

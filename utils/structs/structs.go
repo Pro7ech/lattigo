@@ -5,8 +5,16 @@ type Equatable[T any] interface {
 	Equal(*T) bool
 }
 
-type CopyNewer[V any] interface {
-	CopyNew() *V
+type Cloner[V any] interface {
+	Clone() *V
+}
+
+type Copyer[V any] interface {
+	Copy(*V)
+}
+
+type ShallowCopyer[V any] interface {
+	ShallowCopy() *V
 }
 
 type BinarySizer interface {

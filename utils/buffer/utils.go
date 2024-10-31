@@ -9,9 +9,9 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/Pro7ech/lattigo/utils"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/utils"
 )
 
 // binarySerializer is a testing interface for byte encoding and decoding.

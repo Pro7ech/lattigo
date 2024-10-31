@@ -24,63 +24,82 @@ func OptimalSplit(logDegree int) (logSplit int) {
 
 type Polynomial struct {
 	MetaData
-	Coeffs []*Complex
+	Coeffs []Complex
 }
 
-func (p Polynomial) Clone() Polynomial {
-	Coeffs := make([]*Complex, len(p.Coeffs))
-	for i := range Coeffs {
-		Coeffs[i] = p.Coeffs[i].Clone()
+func (p *Polynomial) Prec() uint {
+	return p.Coeffs[0].Prec()
+}
+
+func (p *Polynomial) Clone() *Polynomial {
+	Coeffs := make([]Complex, len(p.Coeffs))
+	for i := range p.Coeffs {
+		Coeffs[i] = *p.Coeffs[i].Clone()
 	}
 
-	return Polynomial{
+	return &Polynomial{
 		MetaData: p.MetaData,
 		Coeffs:   Coeffs,
 	}
 }
 
+// Float64 returns the coefficients of the receiver in a float64 slice.
+func (p *Polynomial) Float64() (coeffs []float64) {
+	coeffs = make([]float64, len(p.Coeffs))
+	for i := range coeffs {
+		coeffs[i], _ = p.Coeffs[i][0].Float64()
+	}
+	return
+}
+
+func (p *Polynomial) Affine(a, b interface{}) *Polynomial {
+	pAf := p.Clone()
+	prec := pAf.Prec()
+	mul := NewComplexMultiplier().Mul
+	aBig := ToComplex(a, prec)
+	for i := range pAf.Coeffs {
+		mul(&pAf.Coeffs[i], aBig, &pAf.Coeffs[i])
+	}
+
+	bBig := ToComplex(b, prec)
+	if bBig[0].Cmp(new(big.Float)) != 0 && bBig[1].Cmp(new(big.Float)) != 0 {
+		pAf.Coeffs[0].Add(&pAf.Coeffs[0], bBig)
+	}
+
+	return pAf
+}
+
 // NewPolynomial creates a new polynomial from the input parameters:
 // basis: either `Monomial` or `Chebyshev`
-// coeffs: []Complex128, []float64, []*Complex or []*big.Float
+// coeffs: []Complex128, []float64, []bignum.Complex or []big.Float
 // interval: [2]float64{a, b} or *Interval
-func NewPolynomial(basis Basis, coeffs interface{}, interval interface{}) Polynomial {
-	var coefficients []*Complex
+func NewPolynomial(basis Basis, coeffs interface{}, interval interface{}) *Polynomial {
+	var coefficients []Complex
 
 	switch coeffs := coeffs.(type) {
 	case []uint64:
-		coefficients = make([]*Complex, len(coeffs))
+		coefficients = make([]Complex, len(coeffs))
 		for i, c := range coeffs {
-			coefficients[i] = &Complex{
-				new(big.Float).SetUint64(c),
-				new(big.Float),
-			}
+			coefficients[i][0].SetUint64(c)
 		}
 	case []complex128:
-		coefficients = make([]*Complex, len(coeffs))
+		coefficients = make([]Complex, len(coeffs))
 		for i, c := range coeffs {
-			coefficients[i] = &Complex{
-				new(big.Float).SetFloat64(real(c)),
-				new(big.Float).SetFloat64(imag(c)),
-			}
+			coefficients[i][0].SetFloat64(real(c))
+			coefficients[i][1].SetFloat64(imag(c))
 		}
 	case []float64:
-		coefficients = make([]*Complex, len(coeffs))
+		coefficients = make([]Complex, len(coeffs))
 		for i, c := range coeffs {
-			coefficients[i] = &Complex{
-				new(big.Float).SetFloat64(c),
-				new(big.Float),
-			}
+			coefficients[i][0].SetFloat64(c)
 		}
-	case []*Complex:
-		coefficients = make([]*Complex, len(coeffs))
+	case []Complex:
+		coefficients = make([]Complex, len(coeffs))
 		copy(coefficients, coeffs)
-	case []*big.Float:
-		coefficients = make([]*Complex, len(coeffs))
-		for i, c := range coeffs {
-			coefficients[i] = &Complex{
-				new(big.Float).Set(c),
-				new(big.Float),
-			}
+	case []big.Float:
+		coefficients = make([]Complex, len(coeffs))
+		for i := range coeffs {
+			coefficients[i][0].Set(&coeffs[i])
 		}
 	default:
 		panic(fmt.Sprintf("invalid coefficient type, allowed types are []{Complex128, float64, *Complex, *big.Float} but is %T", coeffs))
@@ -99,7 +118,7 @@ func NewPolynomial(basis Basis, coeffs interface{}, interval interface{}) Polyno
 		panic(fmt.Sprintf("invalid interval type, allowed types are [2]float64 or *Interval, but is %T", interval))
 	}
 
-	return Polynomial{
+	return &Polynomial{
 		MetaData: MetaData{
 			Basis:    basis,
 			Interval: inter,
@@ -139,18 +158,18 @@ func (p *Polynomial) ChangeOfBasis() (scalar, constant *big.Float) {
 }
 
 // Depth returns the number of sequential multiplications needed to evaluate the polynomial.
-func (p Polynomial) Depth() int {
+func (p *Polynomial) Depth() int {
 	return int(math.Ceil(math.Log2(float64(p.Degree()))))
 }
 
 // Degree returns the degree of the polynomial.
-func (p Polynomial) Degree() int {
+func (p *Polynomial) Degree() int {
 	return len(p.Coeffs) - 1
 }
 
 // EvaluateModP evalutes the polynomial modulo p, treating each coefficient as
 // integer variables and returning the result as *big.Int in the interval [0, P-1].
-func (p Polynomial) EvaluateModP(xInt, PInt *big.Int) (yInt *big.Int) {
+func (p *Polynomial) EvaluateModP(xInt, PInt *big.Int) (yInt *big.Int) {
 
 	degree := p.Degree()
 
@@ -166,7 +185,7 @@ func (p Polynomial) EvaluateModP(xInt, PInt *big.Int) (yInt *big.Int) {
 		yInt.Add(yInt, PInt)
 	}
 
-	return
+	return yInt.Mod(yInt, PInt)
 }
 
 // Evaluate takes x a *big.Float or *big.Complex and returns y = P(x).
@@ -177,14 +196,14 @@ func (p *Polynomial) Evaluate(x interface{}) (y *Complex) {
 	switch x := x.(type) {
 	case *big.Float:
 		xcmplx = ToComplex(x, x.Prec())
+	case big.Float:
+		xcmplx = ToComplex(x, x.Prec())
 	case *Complex:
 		xcmplx = ToComplex(x, x.Prec())
-	case complex128:
-		xcmplx = ToComplex(x, 64)
-	case float64:
-		xcmplx = ToComplex(x, 64)
+	case Complex:
+		xcmplx = ToComplex(x, x.Prec())
 	default:
-		panic(fmt.Errorf("cannot Evaluate: accepted x.(type) are *big.Float, *Complex, float64 and complex128 but x is %T", x))
+		xcmplx = ToComplex(x, 64)
 	}
 
 	coeffs := p.Coeffs
@@ -199,50 +218,40 @@ func (p *Polynomial) Evaluate(x interface{}) (y *Complex) {
 		y.SetPrec(xcmplx.Prec())
 		for i := n - 2; i >= 0; i-- {
 			mul.Mul(y, xcmplx, y)
-			if coeffs[i] != nil {
-				y.Add(y, coeffs[i])
-			}
+			y.Add(y, &coeffs[i])
 		}
 
 	case Chebyshev:
 
-		tmp := &Complex{new(big.Float), new(big.Float)}
+		two := new(big.Float).SetInt64(2)
+
+		tmp := Complex{}
 
 		scalar, constant := p.ChangeOfBasis()
 
-		xcmplx[0].Mul(xcmplx[0], scalar)
-		xcmplx[1].Mul(xcmplx[1], scalar)
+		xcmplx[0].Mul(&xcmplx[0], scalar)
+		xcmplx[0].Add(&xcmplx[0], constant)
 
-		xcmplx[0].Add(xcmplx[0], constant)
-		xcmplx[1].Add(xcmplx[1], constant)
+		TPrev := Complex{}
+		TPrev.SetPrec(xcmplx.Prec())
+		TPrev[0].SetInt64(1)
 
-		TPrev := &Complex{new(big.Float).SetInt64(1), new(big.Float)}
+		T := *xcmplx
 
-		T := xcmplx
-		if coeffs[0] != nil {
-			y = coeffs[0].Clone()
-		} else {
-			y = &Complex{new(big.Float), new(big.Float)}
-		}
+		TwoT := Complex{}
+		TwoT[0].Mul(&xcmplx[0], two)
+		TwoT[1].Mul(&xcmplx[1], two)
 
+		y = coeffs[0].Clone()
 		y.SetPrec(xcmplx.Prec())
 
-		two := new(big.Float).SetInt64(2)
 		for i := 1; i < n; i++ {
-
-			if coeffs[i] != nil {
-				mul.Mul(T, coeffs[i], tmp)
-				y.Add(y, tmp)
-			}
-
-			tmp[0].Mul(xcmplx[0], two)
-			tmp[1].Mul(xcmplx[1], two)
-
-			mul.Mul(tmp, T, tmp)
-			tmp.Sub(tmp, TPrev)
-
-			TPrev = T.Clone()
-			T = tmp.Clone()
+			mul.Mul(&T, &coeffs[i], &tmp)
+			y.Add(y, &tmp)
+			mul.Mul(&TwoT, &T, &tmp)
+			tmp.Sub(&tmp, &TPrev)
+			TPrev.Set(&T)
+			T.Set(&tmp)
 		}
 
 	default:
@@ -253,27 +262,22 @@ func (p *Polynomial) Evaluate(x interface{}) (y *Complex) {
 }
 
 // Factorize factorizes p as X^{n} * pq + pr.
-func (p Polynomial) Factorize(n int) (pq, pr Polynomial) {
+func (p *Polynomial) Factorize(n int) (pq, pr *Polynomial) {
 
 	if n < p.Degree()>>1 {
 		panic("cannot Factorize: n < p.Degree()/2")
 	}
 
 	// ns a polynomial p such that p = q*C^degree + r.
-	pr = Polynomial{}
-	pr.Coeffs = make([]*Complex, n)
+	pr = &Polynomial{}
+	pr.Coeffs = make([]Complex, n)
 	for i := 0; i < n; i++ {
-		if p.Coeffs[i] != nil {
-			pr.Coeffs[i] = p.Coeffs[i].Clone()
-		}
+		pr.Coeffs[i] = *p.Coeffs[i].Clone()
 	}
 
-	pq = Polynomial{}
-	pq.Coeffs = make([]*Complex, p.Degree()-n+1)
-
-	if p.Coeffs[n] != nil {
-		pq.Coeffs[0] = p.Coeffs[n].Clone()
-	}
+	pq = &Polynomial{}
+	pq.Coeffs = make([]Complex, p.Degree()-n+1)
+	pq.Coeffs[0] = *p.Coeffs[n].Clone()
 
 	odd := p.IsOdd
 	even := p.IsEven
@@ -281,24 +285,17 @@ func (p Polynomial) Factorize(n int) (pq, pr Polynomial) {
 	switch p.Basis {
 	case Monomial:
 		for i := n + 1; i < p.Degree()+1; i++ {
-			if p.Coeffs[i] != nil && (!(even || odd) || (i&1 == 0 && even) || (i&1 == 1 && odd)) {
-				pq.Coeffs[i-n] = p.Coeffs[i].Clone()
+			if !(even || odd) || (i&1 == 0 && even) || (i&1 == 1 && odd) {
+				pq.Coeffs[i-n] = *p.Coeffs[i].Clone()
 			}
 		}
 	case Chebyshev:
 
 		for i, j := n+1, 1; i < p.Degree()+1; i, j = i+1, j+1 {
-			if p.Coeffs[i] != nil && (!(even || odd) || (i&1 == 0 && even) || (i&1 == 1 && odd)) {
-				pq.Coeffs[i-n] = p.Coeffs[i].Clone()
-				pq.Coeffs[i-n].Add(pq.Coeffs[i-n], pq.Coeffs[i-n])
-
-				if pr.Coeffs[n-j] != nil {
-					pr.Coeffs[n-j].Sub(pr.Coeffs[n-j], p.Coeffs[i])
-				} else {
-					pr.Coeffs[n-j] = p.Coeffs[i].Clone()
-					pr.Coeffs[n-j][0].Neg(pr.Coeffs[n-j][0])
-					pr.Coeffs[n-j][1].Neg(pr.Coeffs[n-j][1])
-				}
+			if !(even || odd) || (i&1 == 0 && even) || (i&1 == 1 && odd) {
+				pq.Coeffs[i-n] = *p.Coeffs[i].Clone()
+				pq.Coeffs[i-n].Add(&pq.Coeffs[i-n], &pq.Coeffs[i-n])
+				pr.Coeffs[n-j].Sub(&pr.Coeffs[n-j], &p.Coeffs[i])
 			}
 		}
 	}

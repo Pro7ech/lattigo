@@ -3,9 +3,9 @@ package hefloat
 import (
 	"fmt"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he"
-	"github.com/tuneinsight/lattigo/v5/ring"
+	"github.com/Pro7ech/lattigo/he"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 // EvaluatorForMinimaxCompositePolynomial defines a set of common and scheme agnostic method that are necessary to instantiate a MinimaxCompositePolynomialEvaluator.
@@ -31,7 +31,7 @@ func NewMinimaxCompositePolynomialEvaluator(params Parameters, eval EvaluatorFor
 }
 
 // Evaluate evaluates the provided MinimaxCompositePolynomial on the input ciphertext.
-func (eval MinimaxCompositePolynomialEvaluator) Evaluate(ct *rlwe.Ciphertext, mcp MinimaxCompositePolynomial) (res *rlwe.Ciphertext, err error) {
+func (eval MinimaxCompositePolynomialEvaluator) Evaluate(in *rlwe.Ciphertext, mcp MinimaxCompositePolynomial, targetScale rlwe.Scale) (out *rlwe.Ciphertext, err error) {
 
 	params := eval.Parameters
 
@@ -39,23 +39,30 @@ func (eval MinimaxCompositePolynomialEvaluator) Evaluate(ct *rlwe.Ciphertext, mc
 
 	levelsConsumedPerRescaling := params.LevelsConsumedPerRescaling()
 
-	// Checks that the number of levels available after the bootstrapping is enough to evaluate all polynomials
-	if maxDepth := mcp.MaxDepth() * levelsConsumedPerRescaling; params.MaxLevel() < maxDepth+btp.MinimumInputLevel() {
-		return nil, fmt.Errorf("parameters do not enable the evaluation of the minimax composite polynomial, required levels is %d but parameters only provide %d levels", maxDepth+btp.MinimumInputLevel(), params.MaxLevel())
+	if btp != nil {
+		// Checks that the number of levels available after the bootstrapping is enough to evaluate all polynomials
+		if maxDepth := mcp.MaxDepth() * levelsConsumedPerRescaling; params.MaxLevel() < maxDepth+btp.MinimumInputLevel() {
+			return nil, fmt.Errorf("parameters do not enable the evaluation of the minimax composite polynomial, required levels is %d but parameters only provide %d levels", maxDepth+btp.MinimumInputLevel(), params.MaxLevel())
+		}
+	} else {
+		// Checks that the number of levels available after the bootstrapping is enough to evaluate all polynomials
+		if maxDepth := mcp.MaxDepth() * levelsConsumedPerRescaling; params.MaxLevel() < maxDepth {
+			return nil, fmt.Errorf("parameters do not enable the evaluation of the minimax composite polynomial, required levels is %d but parameters only provide %d levels", maxDepth, params.MaxLevel())
+		}
 	}
 
-	res = ct.CopyNew()
+	out = in.Clone()
 
-	for _, poly := range mcp {
+	for k, poly := range mcp {
 
-		// Checks that res has enough level to evaluate the next polynomial, else bootstrap
-		if res.Level() < poly.Depth()*params.LevelsConsumedPerRescaling()+btp.MinimumInputLevel() {
-			if res, err = btp.Bootstrap(res); err != nil {
+		// Checks that out has enough level to evaluate the next polynomial, else bootstrap
+		if out.Level() < poly.Depth()*params.LevelsConsumedPerRescaling()+btp.MinimumInputLevel() {
+			if out, err = btp.Bootstrap(out); err != nil {
 				return
 			}
 		}
 
-		// Define the scale that res must have after the polynomial evaluation.
+		// Define the scale that out must have after the polynomial evaluation.
 		// If we use the regular CKKS (with complex values), we chose a scale to be
 		// half of the desired scale, so that (x + conj(x)/2) has the correct scale.
 		var targetScale rlwe.Scale
@@ -66,7 +73,7 @@ func (eval MinimaxCompositePolynomialEvaluator) Evaluate(ct *rlwe.Ciphertext, mc
 		}
 
 		// Evaluate the polynomial
-		if res, err = eval.PolynomialEvaluator.Evaluate(res, poly, targetScale); err != nil {
+		if out, err = eval.PolynomialEvaluator.Evaluate(out, &poly, targetScale); err != nil {
 			return nil, fmt.Errorf("evaluate polynomial: %w", err)
 		}
 
@@ -74,21 +81,24 @@ func (eval MinimaxCompositePolynomialEvaluator) Evaluate(ct *rlwe.Ciphertext, mc
 		if params.RingType() == ring.Standard {
 
 			// Reassigns the scale back to the original one
-			res.Scale = res.Scale.Mul(rlwe.NewScale(2))
+			out.Scale = out.Scale.Mul(rlwe.NewScale(2))
 
-			var resConj *rlwe.Ciphertext
-			if resConj, err = eval.ConjugateNew(res); err != nil {
+			var outConj *rlwe.Ciphertext
+			if outConj, err = eval.ConjugateNew(out); err != nil {
 				return
 			}
 
-			if err = eval.Add(res, resConj, res); err != nil {
+			if err = eval.Add(out, outConj, out); err != nil {
 				return
 			}
 		}
-	}
 
-	// Avoids float errors
-	res.Scale = ct.Scale
+		if k != len(mcp)-1 {
+			if err = eval.Rescale(out, out); err != nil {
+				return nil, fmt.Errorf("eval.Rescale: %w", err)
+			}
+		}
+	}
 
 	return
 }

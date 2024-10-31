@@ -169,3 +169,117 @@ func ArithmeticGeometricMean(x, y *big.Float) *big.Float {
 func Sign(x *big.Float) (y *big.Float) {
 	return NewFloat(float64(x.Cmp(NewFloat(0.0, x.Prec()))), x.Prec())
 }
+
+// Log2ErfC returns log2(1 - erf(x)).
+func Log2ErfC(x float64, prec uint) (rF64 float64) {
+
+	// Implements erfByEquation2 & erfcByEquation3
+	// of "The functions erf and erfc computed with
+	// arbitrary precision  and explicit error bounds"
+	// from S. Chevillard.
+	N := int(prec)
+
+	L := int(math.Ceil(math.Sqrt(float64(N))))
+
+	S := make([]*big.Float, L)
+	for i := range S {
+		S[i] = new(big.Float).SetPrec(prec)
+	}
+
+	xBig := new(big.Float).SetPrec(prec).SetFloat64(x)
+
+	var y *big.Float
+
+	t := 10.0
+
+	if x > t {
+		// acc <- x * x
+		acc := new(big.Float).Mul(xBig, xBig)
+
+		// y <- 1/(2*acc)
+		y = new(big.Float).Add(acc, acc)
+		y.Quo(new(big.Float).SetPrec(1), y)
+
+		// acc <- exp(-acc)
+		acc.Neg(acc)
+		acc = Exp(acc)
+
+		// tmp <- x * sqrt(pi)
+		tmp := Pi(prec)
+		tmp.Sqrt(tmp)
+		tmp.Mul(xBig, tmp)
+
+		// acc <- acc / tmp
+		acc.Quo(acc, tmp)
+
+		z := Pow(y, new(big.Float).SetPrec(prec).SetFloat64(float64(L)))
+
+		for k, i := 0, 0; k <= N; k++ {
+
+			if k&1 == 0 {
+				S[i].Add(S[i], acc)
+			} else {
+				S[i].Sub(S[i], acc)
+			}
+
+			if i == L-1 {
+				i = 0
+				acc.Mul(acc, z)
+			} else {
+				i++
+			}
+
+			acc.Mul(acc, new(big.Float).SetPrec(prec).SetInt64(int64(2*k-1)))
+		}
+
+	} else {
+
+		// y <- 2 * x * x
+		y = new(big.Float).Mul(xBig, xBig)
+		y.Add(y, y)
+		z := Pow(y, new(big.Float).SetPrec(prec).SetFloat64(float64(L)))
+
+		// acc <- 2*x/sqrt(pi)
+		acc := Pi(prec)
+		acc.Sqrt(acc)
+		acc.Quo(xBig, acc)
+		acc.Add(acc, acc)
+
+		// tmp <- exp(-x^2)
+		tmp := new(big.Float).Mul(xBig, xBig)
+		tmp.Neg(tmp)
+		tmp = Exp(tmp)
+
+		// acc <- 2*x/sqrt(pi) * exp(-x^2)
+		acc.Mul(acc, tmp)
+
+		for k, i := 1, 0; k <= N; k++ {
+			S[i].Add(S[i], acc)
+
+			if i == L-1 {
+				i = 0
+				acc.Mul(acc, z)
+			} else {
+				i++
+			}
+			acc.Quo(acc, new(big.Float).SetPrec(prec).SetInt64(int64(2*k+1)))
+		}
+	}
+
+	r := S[L-1]
+	for i := L - 2; i >= 0; i-- {
+		r.Mul(r, y)
+		r.Add(r, S[i])
+	}
+
+	if x <= t {
+		r.Sub(new(big.Float).SetPrec(prec).SetInt64(1), r)
+	}
+
+	r = Log(r)
+	r.Quo(r, Log2(prec))
+
+	rF64, _ = r.Float64()
+
+	return rF64
+}

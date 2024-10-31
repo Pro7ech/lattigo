@@ -3,11 +3,14 @@ package heint_test
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"runtime"
 	"testing"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/heint"
+	"github.com/Pro7ech/lattigo/he/heint"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/sampling"
+	"github.com/stretchr/testify/require"
 )
 
 func GetBenchName(params heint.Parameters, opname string) string {
@@ -33,10 +36,11 @@ func BenchmarkHEInt(b *testing.B) {
 	default:
 		testParams = []heint.ParametersLiteral{
 			{
-				LogN:             14,
-				LogQ:             []int{50, 40, 40, 40, 40, 40, 40, 40},
-				LogP:             []int{60},
-				PlaintextModulus: 0x10001,
+				LogN: 14,
+				LogQ: []int{50, 40, 40, 40, 40, 40, 40, 40},
+				LogP: []int{60},
+				T:    0x10001,
+				R:    1,
 			},
 		}
 	}
@@ -103,22 +107,21 @@ func benchKeyGenerator(tc *testContext, b *testing.B) {
 func benchEncoder(tc *testContext, b *testing.B) {
 
 	params := tc.params
-
-	poly := tc.uSampler.ReadNew()
-	params.RingT().Reduce(poly, poly)
-	coeffsUint64 := poly.Coeffs[0]
-	coeffsInt64 := make([]int64, len(coeffsUint64))
-	for i := range coeffsUint64 {
-		coeffsInt64[i] = int64(coeffsUint64[i])
-	}
-
 	encoder := tc.encoder
+	T := tc.params.PlaintextModulus()
+	r := rand.New(sampling.NewSource([32]byte{0x00}))
 
 	b.Run(GetBenchName(params, "Encoder/Encode/Uint"), func(b *testing.B) {
+
+		values := make([]uint64, params.MaxSlots())
+		for i := range values {
+			values[i] = r.Uint64N(T)
+		}
+
 		plaintext := heint.NewPlaintext(params, params.MaxLevel())
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := encoder.Encode(coeffsUint64, plaintext); err != nil {
+			if err := encoder.Encode(values, plaintext); err != nil {
 				b.Log(err)
 				b.Fail()
 			}
@@ -126,10 +129,16 @@ func benchEncoder(tc *testContext, b *testing.B) {
 	})
 
 	b.Run(GetBenchName(params, "Encoder/Encode/Int"), func(b *testing.B) {
+
+		values := make([]int64, params.MaxSlots())
+		for i := range values {
+			values[i] = r.Int64N(int64(T)) - int64(T>>1)
+		}
+
 		plaintext := heint.NewPlaintext(params, params.MaxLevel())
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := encoder.Encode(coeffsInt64, plaintext); err != nil {
+			if err := encoder.Encode(values, plaintext); err != nil {
 				b.Log(err)
 				b.Fail()
 			}
@@ -137,10 +146,17 @@ func benchEncoder(tc *testContext, b *testing.B) {
 	})
 
 	b.Run(GetBenchName(params, "Encoder/Decode/Uint"), func(b *testing.B) {
+
+		values := make([]uint64, params.MaxSlots())
+		for i := range values {
+			values[i] = r.Uint64N(T)
+		}
+
 		plaintext := heint.NewPlaintext(params, params.MaxLevel())
+		require.NoError(b, encoder.Encode(values, plaintext))
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := encoder.Decode(plaintext, coeffsUint64); err != nil {
+			if err := encoder.Decode(plaintext, values); err != nil {
 				b.Log(err)
 				b.Fail()
 			}
@@ -148,10 +164,17 @@ func benchEncoder(tc *testContext, b *testing.B) {
 	})
 
 	b.Run(GetBenchName(params, "Encoder/Decode/Int"), func(b *testing.B) {
+
+		values := make([]int64, params.MaxSlots())
+		for i := range values {
+			values[i] = r.Int64N(int64(T)) - int64(T>>1)
+		}
+
 		plaintext := heint.NewPlaintext(params, params.MaxLevel())
+		require.NoError(b, encoder.Encode(values, plaintext))
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := encoder.Decode(plaintext, coeffsInt64); err != nil {
+			if err := encoder.Decode(plaintext, values); err != nil {
 				b.Log(err)
 				b.Fail()
 			}
@@ -162,18 +185,19 @@ func benchEncoder(tc *testContext, b *testing.B) {
 func benchEncryptor(tc *testContext, b *testing.B) {
 
 	params := tc.params
+	T := params.PlaintextModulus()
+	r := rand.New(sampling.NewSource([32]byte{0x00}))
 
 	b.Run(GetBenchName(params, "Encryptor/Encrypt/Sk"), func(b *testing.B) {
 
 		pt := heint.NewPlaintext(params, params.MaxLevel())
 
-		poly := tc.uSampler.ReadNew()
-		params.RingT().Reduce(poly, poly)
-
-		if err := tc.encoder.Encode(poly.Coeffs[0], pt); err != nil {
-			b.Log(err)
-			b.Fail()
+		values := make([]uint64, params.MaxSlots())
+		for i := range values {
+			values[i] = r.Uint64N(T)
 		}
+
+		require.NoError(b, tc.encoder.Encode(values, pt))
 
 		ct := heint.NewCiphertext(params, 1, pt.Level())
 
@@ -193,13 +217,12 @@ func benchEncryptor(tc *testContext, b *testing.B) {
 
 		pt := heint.NewPlaintext(params, params.MaxLevel())
 
-		poly := tc.uSampler.ReadNew()
-		params.RingT().Reduce(poly, poly)
-
-		if err := tc.encoder.Encode(poly.Coeffs[0], pt); err != nil {
-			b.Log(err)
-			b.Fail()
+		values := make([]uint64, params.MaxSlots())
+		for i := range values {
+			values[i] = r.Uint64N(T)
 		}
+
+		require.NoError(b, tc.encoder.Encode(values, pt))
 
 		ct := heint.NewCiphertext(params, 1, pt.Level())
 
@@ -219,7 +242,8 @@ func benchEncryptor(tc *testContext, b *testing.B) {
 
 		pt := heint.NewPlaintext(params, params.MaxLevel())
 
-		ct := rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 1, params.MaxLevel())
+		ct := heint.NewCiphertext(params, 1, params.MaxLevel())
+		ct.Randomize(params, sampling.NewSource(sampling.NewSeed()))
 
 		*ct.MetaData = *pt.MetaData
 
@@ -238,17 +262,20 @@ func benchEvaluator(tc *testContext, b *testing.B) {
 	params := tc.params
 	eval := tc.evaluator
 
-	plaintext := heint.NewPlaintext(params, params.MaxLevel())
-	plaintext.Value = rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 0, plaintext.Level()).Value[0]
+	source := sampling.NewSource(sampling.NewSeed())
 
-	ciphertext1 := rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 1, params.MaxLevel())
-	ciphertext2 := rlwe.NewCiphertextRandom(tc.prng, params.Parameters, 1, params.MaxLevel())
+	plaintext := heint.NewPlaintext(params, params.MaxLevel())
+	plaintext.Randomize(params, source)
+
+	ciphertext1 := heint.NewCiphertext(params, 1, params.MaxLevel())
+	ciphertext1.Randomize(params, source)
+
+	ciphertext2 := heint.NewCiphertext(params, 1, params.MaxLevel())
+	ciphertext2.Randomize(params, source)
+
 	scalar := params.PlaintextModulus() >> 1
 
-	*ciphertext1.MetaData = *plaintext.MetaData
-	*ciphertext2.MetaData = *plaintext.MetaData
-
-	vector := plaintext.Value.Coeffs[0][:params.MaxSlots()]
+	vector := plaintext.Q.At(0)[:params.MaxSlots()]
 
 	b.Run(GetBenchName(params, "Evaluator/Add/Scalar"), func(b *testing.B) {
 		receiver := heint.NewCiphertext(params, 1, ciphertext1.Level())

@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/heint"
-	"github.com/tuneinsight/lattigo/v5/mhe"
+	"github.com/Pro7ech/lattigo/he/heint"
+	"github.com/Pro7ech/lattigo/mhe"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 func BenchmarkInteger(b *testing.B) {
@@ -26,9 +25,10 @@ func BenchmarkInteger(b *testing.B) {
 
 	for _, p := range paramsLiterals {
 
-		for _, plaintextModulus := range testPlaintextModulus[:] {
+		for _, T := range testPlaintextModulus[:] {
 
-			p.PlaintextModulus = plaintextModulus
+			p.T = T
+			p.R = 1
 
 			var params heint.Parameters
 			if params, err = heint.NewParametersFromLiteral(p); err != nil {
@@ -49,7 +49,7 @@ func BenchmarkInteger(b *testing.B) {
 
 func benchRefresh(tc *testContext, b *testing.B) {
 
-	sk0Shards := tc.sk0Shards
+	skShares := tc.skShares
 
 	minLevel := 0
 	maxLevel := tc.params.MaxLevel()
@@ -57,38 +57,36 @@ func benchRefresh(tc *testContext, b *testing.B) {
 	type Party struct {
 		RefreshProtocol
 		s     *rlwe.SecretKey
-		share mhe.RefreshShare
+		share *mhe.RefreshShare
 	}
 
 	p := new(Party)
-	var err error
-	p.RefreshProtocol, err = NewRefreshProtocol(tc.params, tc.params.Xe())
-	require.NoError(b, err)
-	p.s = sk0Shards[0]
-	p.share = p.AllocateShare(minLevel, maxLevel)
+	p.RefreshProtocol = *NewRefreshProtocol(tc.params)
+	p.s = skShares[0]
+	p.share = p.Allocate(minLevel, maxLevel)
 
 	ciphertext := heint.NewCiphertext(tc.params, 1, minLevel)
 
-	crp := p.SampleCRP(maxLevel, tc.crs)
+	seed := [32]byte{}
 
 	b.Run(GetTestName("Refresh/Round1/Gen", tc.params, tc.NParties), func(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
-			p.GenShare(p.s, ciphertext, crp, &p.share)
+			p.Gen(p.s, ciphertext, seed, p.share)
 		}
 	})
 
 	b.Run(GetTestName("Refresh/Round1/Agg", tc.params, tc.NParties), func(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
-			p.AggregateShares(p.share, p.share, &p.share)
+			p.Aggregate(p.share, p.share, p.share)
 		}
 	})
 
 	b.Run(GetTestName("Refresh/Finalize", tc.params, tc.NParties), func(b *testing.B) {
 		opOut := heint.NewCiphertext(tc.params, 1, maxLevel)
 		for i := 0; i < b.N; i++ {
-			p.Finalize(ciphertext, crp, p.share, opOut)
+			p.Finalize(ciphertext, p.share, opOut)
 		}
 	})
 }

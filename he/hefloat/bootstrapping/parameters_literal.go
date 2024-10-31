@@ -1,76 +1,151 @@
 package bootstrapping
 
 import (
-	"encoding/json"
+	"bufio"
 	"fmt"
-	"math"
+	"io"
 	"math/bits"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils/structs"
 )
 
-// ParametersLiteral is a struct to parameterize the bootstrapping parameters.
-// The `ParametersLiteral` struct an unchecked struct that is given to the method `NewParametersFromLiteral` to validate them
-// and create the bootstrapping `Parameter` struct, which is used to instantiate a `Bootstrapper`.
-// This struct contains only optional fields.
-// The default bootstrapping (with no optional field) has
-// - Depth 4 for CoeffsToSlots
-// - Depth 8 for EvalMod
-// - Depth 3 for SlotsToCoeffs
-// for a total depth of 15 and a bit consumption of 821
-// A precision, for complex values with both real and imaginary parts uniformly distributed in -1, 1 of
+// ParametersLiteral is an unchecked struct that is given to the method [NewParametersFromLiteral]
+// to validate them and create a [Parameter] struct, which is used to instantiate an [Evaluator].
+//
+// The fields can set manually to customize the bootstrapping circuit, but it is recommanded
+// to first instantiate the struct with the method [NewParametersLiteral], which will return
+// a new [ParametersLiteral] struct with the default bootstrapping parameterization (see
+// [NewParametersLiteral] for information about its performance).
+type ParametersLiteral struct {
+	// Initialized is  boolean flag set to true if the struct
+	// was intantiated with the method [NewParametersLiteral].
+	Initialized bool
+
+	// EvalRound is a boolean flag indicating if the circuit
+	// follows the approach of https://eprint.iacr.org/2024/1379.
+	EvalRound bool
+
+	// LogN is the base two logarithm of the ring degree of the bootstrapping parameters.
+	LogN int
+
+	// LogSlots is the maximum number of slots of the ciphertext.
+	LogSlots int
+
+	// LogP is the base two logarithm of the auxiliary primes during the key-switching operation of the bootstrapping parameters.
+	LogP structs.Vector[int]
+
+	// Xs is the distribution of the secret-key used to generate the bootstrapping evaluation keys.
+	Xs ring.DistributionParameters
+
+	// Xe is the distribution of the error sampled to generate the bootstrapping evaluation keys.
+	Xe ring.DistributionParameters
+
+	// C2S: the scaling factor and distribution of the moduli for the SlotsToCoeffs (homomorphic encoding) step.
+	// See [hefloat.DFTMatrix] for additional information.
+	C2S structs.Matrix[int]
+
+	// S2C: the scaling factor and distribution of the moduli for the CoeffsToSlots (homomorphic decoding) step.
+	// See [hefloat.DFTMatrix] for additional information.
+	S2C structs.Matrix[int]
+
+	// EphemeralSecretWeight: the Hamming weight of the ephemeral secret.
+	//	The user can set this value to 0 to use the regular bootstrapping
+	//  circuit without the ephemeral secret encapsulation.
+	//	Be aware that doing so will impact the security, precision,
+	//  and failure probability of the bootstrapping circuit.
+	//	See https://eprint.iacr.org/2022/024 for more information.
+	EphemeralSecretWeight int
+
+	// Iterations : by treating the bootstrapping as a black box with precision logprec,
+	// we can construct a bootstrapping of precision ~k*logprec by iteration (see https://eprint.iacr.org/2022/1167).
+	// - BootstrappingPrecision: []float64, the list of iterations (after the initial bootstrapping) given by the
+	//   expected precision of each previous iteration.
+	// - ReservedPrimeBitSize: the size of the reserved prime for the scaling after the initial bootstrapping.
+	Iterations Iterations
+
+	// LogMessageRation is Log(Q/Scale). This ratio directly impacts the precision of the bootstrapping.
+	// The homomorphic modular reduction x mod 1 is approximated with by sin(2*pi*x)/(2*pi),
+	// which is a good approximation when x is close to the origin.
+	// Thus a large message ratio (i.e. 2^8) implies that x is small
+	// with respect to Q, and thus close to the origin.
+	// When using a small ratio (i.e. 2^4), for example if ct.Scale
+	// is close to Q[0] is small or if |m| is large, the Mod1InvDegree can be set to
+	// a non zero value (i.e. 5 or 7). This will greatly improve the precision of the
+	// bootstrapping, at the expense of slightly increasing its depth.
+	LogMessageRatio int
+
+	// Mod1Type: the type of approximation for the modular reduction polynomial.
+	Mod1Type hefloat.Mod1Type
+
+	// Mod1LogScale: the scaling factor used during the EvalMod step (all primes will have this bit-size).
+	Mod1LogScale int
+
+	// Mod1Degree is the degree of f: x mod 1.
+	Mod1Degree int
+
+	// Mod1Interval is the range of the approximation interval of Mod1.
+	Mod1Interval int
+
+	// DoubleAngle is the number of double angle evaluation.
+	DoubleAngle int
+
+	// Mod1InvDegree: the degree of f^-1: (x mod 1)^-1.
+	Mod1InvDegree int
+}
+
+// NewParametersLiteral returns a [bootstrapping.ParametersLiteral] with default value,
+// ensuring a bootstrapping with the following standardized performance:
+//
+// Depth:
+// - 2 for CoeffsToSlots
+// - 8 for EvalMod
+// - 3 for SlotsToCoeffs
+// for a total 13 and a bit consumption of 713.
+//
+// Precision:
 // - 27.25 bits for H=192
-// - 23.8 bits for H=32768,
-// And a failure probability of 2^{-138.7} for 2^{15} slots.
+// - 23.8 bits for H=32768
+// for complex values with both real and imaginary parts uniformly distributed in [-1, 1].
 //
-// =====================================
-// Optional fields (with default values)
-// =====================================
+// Failure probability:
+// - 2^{-133} for 2^{15} slots.
+func NewParametersLiteral() (p ParametersLiteral) {
+	p.EvalRound = true
+	p.LogN = 16
+	p.LogSlots = 15
+	p.LogMessageRatio = 8
+	p.LogP = []int{61, 61, 61, 61, 61}
+	p.Xs = &ring.Ternary{H: 192}
+	p.Xe = &rlwe.DefaultXe
+	p.EvalRound = true
+	p.C2S = [][]int{{29, 29}, {29, 29}}
+	p.S2C = [][]int{{39}, {39}, {39}}
+	p.Mod1Type = hefloat.CosDiscrete
+	p.Mod1Degree = 30
+	p.Mod1Interval = 16
+	p.Mod1LogScale = 60
+	p.DoubleAngle = 3
+	p.EphemeralSecretWeight = 32 // >> 128-bit for LogN=16 & Log(QP) ~ 121 bits.
+	p.Iterations = Iterations{}
+	p.Initialized = true
+	return
+}
+
+type CircuitOrder int
+
+const (
+	ModUpThenEncode = CircuitOrder(0) // ScaleDown -> ModUp -> CoeffsToSlots -> EvalMod -> SlotsToCoeffs.
+	DecodeThenModUp = CircuitOrder(1) // SlotsToCoeffs -> ScaleDown -> ModUp -> CoeffsToSlots -> EvalMod.
+	Custom          = CircuitOrder(2) // Custom order (e.g. partial bootstrapping), disables checks.
+)
+
+// Iterations is a struct storing the iterations parameters of the bootstrapping.
 //
-// LogN: the log2 of the ring degree of the bootstrapping parameters. The default value is 16.
-//
-// LogP: the log2 of the auxiliary primes during the key-switching operation of the bootstrapping parameters.
-// The default value is [61]*max(1, floor(sqrt(#Qi))).
-//
-// Xs: the distribution of the secret-key used to generate the bootstrapping evaluation keys.
-// The default value is ring.Ternary{H: 192}.
-//
-// Xe: the distribution of the error sampled to generate the bootstrapping evaluation keys.
-// The default value is rlwe.DefaultXe.
-//
-// LogSlots: the maximum number of slots of the ciphertext. Default value: LogN-1.
-//
-// CoeffsToSlotsFactorizationDepthAndLogPlaintextScales: the scaling factor and distribution of the moduli for the SlotsToCoeffs (homomorphic encoding) step.
-//
-//	Default value is [][]int{min(4, max(LogSlots, 1)) * 56}.
-//	This is a double slice where the first dimension is the index of the prime to be used, and the second dimension the scaling factors to be used: [level][scaling].
-//	For example: [][]int{{45}, {46}, {47}} means that the CoeffsToSlots step will use three levels, each with one prime. Primes are consumed in reverse order,
-//	so in this example the first matrix will use the prime of 47 bits, the second the prime of 46 bits, and so on.
-//	Non standard parameterization can include multiple scaling factors for a same prime, for example [][]int{{30}, {30, 30}} will use two levels for three matrices.
-//	The first two matrices will consume a prime of 30 + 30 bits, and have a scaling factor which prime^(1/2), and the third matrix will consume the second prime of 30 bits.
-//
-// SlotsToCoeffsFactorizationDepthAndLogPlaintextScales: the scaling factor and distribution of the moduli for the CoeffsToSlots (homomorphic decoding) step.
-//
-//	Parameterization is identical to C2SLogPlaintextScale. and the default value is [][]int{min(3, max(LogSlots, 1)) * 39}.
-//
-// EvalModLogPlaintextScale: the scaling factor used during the EvalMod step (all primes will have this bit-size).
-//
-//	Default value is 60.
-//
-// EphemeralSecretWeight: the Hamming weight of the ephemeral secret, by default set to 32, which ensure over 128-bit security for an evaluation key of modulus 121 bits.
-//
-//	The user can set this value to 0 to use the regular bootstrapping circuit without the ephemeral secret encapsulation.
-//	Be aware that doing so will impact the security, precision, and failure probability of the bootstrapping circuit.
-//	See https://eprint.iacr.org/2022/024 for more information.
-//
-// IterationsParameters : by treating the bootstrapping as a black box with precision logprec, we can construct a bootstrapping of precision ~k*logprec by iteration (see https://eprint.iacr.org/2022/1167).
-// - BootstrappingPrecision: []float64, the list of iterations (after the initial bootstrapping) given by the expected precision of each previous iteration.
-// - ReservedPrimeBitSize: the size of the reserved prime for the scaling after the initial bootstrapping.
-//
-// For example: &bootstrapping.IterationsParameters{BootstrappingPrecision: []float64{16}, ReservedPrimeBitSize: 16} will define a two iteration bootstrapping (the first iteration being the initial bootstrapping)
+// For example: &bootstrapping.Iterations{BootstrappingPrecision: []float64{16}, ReservedPrimeBitSize: 16} will define a two iteration bootstrapping (the first iteration being the initial bootstrapping)
 // with a additional prime close to 2^{16} reserved for the scaling of the error during the second iteration.
 //
 // Here is an example for a two iterations bootstrapping of an input message mod [logq0=55, logq1=45] with scaling factor 2^{90}:
@@ -102,432 +177,427 @@ import (
 //     To solve this issue, we can reduce logprec for the last iterations, but this increases the number of iterations, or reserve a prime of size at least 2^{logprec} to get
 //     a proper scaling by q1/2^{k * logprec} (i.e. not a integer rounded scaling).
 //   - If the input ciphertext is at level 0, we must reserve a prime because everything happens within Q[0] and we have no other prime to use for rescaling.
-//
-// LogMessageRatio: the log of expected ratio Q[0]/|m|, by default set to 8 (ratio of 256.0).
-//
-//		This ratio directly impacts the precision of the bootstrapping.
-//		The homomorphic modular reduction x mod 1 is approximated with by sin(2*pi*x)/(2*pi), which is a good approximation
-//		when x is close to the origin. Thus a large message ratio (i.e. 2^8) implies that x is small with respect to Q, and thus close to the origin.
-//		When using a small ratio (i.e. 2^4), for example if ct.PlaintextScale is close to Q[0] is small or if |m| is large, the Mod1InvDegree can be set to
-//	 a non zero value (i.e. 5 or 7). This will greatly improve the precision of the bootstrapping, at the expense of slightly increasing its depth.
-//
-// Mod1Type: the type of approximation for the modular reduction polynomial. By default set to hefloat.CosDiscrete.
-//
-// K: the range of the approximation interval, by default set to 16.
-//
-// Mod1Degree: the degree of f: x mod 1. By default set to 30.
-//
-// DoubleAngle: the number of double angle evaluation. By default set to 3.
-//
-// Mod1InvDegree: the degree of the f^-1: (x mod 1)^-1, by default set to 0.
-type ParametersLiteral struct {
-	LogN                                        *int                        // Default: 16
-	LogP                                        []int                       // Default: 61 * max(1, floor(sqrt(#Qi)))
-	Xs                                          ring.DistributionParameters // Default: ring.Ternary{H: 192}
-	Xe                                          ring.DistributionParameters // Default: rlwe.DefaultXe
-	LogSlots                                    *int                        // Default: LogN-1
-	CoeffsToSlotsFactorizationDepthAndLogScales [][]int                     // Default: [][]int{min(4, max(LogSlots, 1)) * 56}
-	SlotsToCoeffsFactorizationDepthAndLogScales [][]int                     // Default: [][]int{min(3, max(LogSlots, 1)) * 39}
-	EvalModLogScale                             *int                        // Default: 60
-	EphemeralSecretWeight                       *int                        // Default: 32
-	IterationsParameters                        *IterationsParameters       // Default: nil (default starting level of 0 and 1 iteration)
-	Mod1Type                                    hefloat.Mod1Type            // Default: hefloat.CosDiscrete
-	LogMessageRatio                             *int                        // Default: 8
-	K                                           *int                        // Default: 16
-	Mod1Degree                                  *int                        // Default: 30
-	DoubleAngle                                 *int                        // Default: 3
-	Mod1InvDegree                               *int                        // Default: 0
-}
-
-type CircuitOrder int
-
-const (
-	ModUpThenEncode = CircuitOrder(0) // ScaleDown -> ModUp -> CoeffsToSlots -> EvalMod -> SlotsToCoeffs.
-	DecodeThenModUp = CircuitOrder(1) // SlotsToCoeffs -> ScaleDown -> ModUp -> CoeffsToSlots -> EvalMod.
-	Custom          = CircuitOrder(2) // Custom order (e.g. partial bootstrapping), disables checks.
-)
-
-const (
-	// DefaultLogN is the default ring degree for the bootstrapping.
-	DefaultLogN = 16
-	// DefaultCoeffsToSlotsFactorizationDepth is the default factorization depth CoeffsToSlots step.
-	DefaultCoeffsToSlotsFactorizationDepth = 4
-	// DefaultSlotsToCoeffsFactorizationDepth is the default factorization depth SlotsToCoeffs step.
-	DefaultSlotsToCoeffsFactorizationDepth = 3
-	// DefaultCoeffsToSlotsLogScale is the default scaling factors for the CoeffsToSlots step.
-	DefaultCoeffsToSlotsLogScale = 56
-	// DefaultSlotsToCoeffsLogScale is the default scaling factors for the SlotsToCoeffs step.
-	DefaultSlotsToCoeffsLogScale = 39
-	// DefaultEvalModLogScale is the default scaling factor for the EvalMod step.
-	DefaultEvalModLogScale = 60
-	// DefaultEphemeralSecretWeight is the default Hamming weight of the ephemeral secret.
-	DefaultEphemeralSecretWeight = 32
-	// DefaultIterations is the default number of bootstrapping iterations.
-	DefaultIterations = 1
-	// DefaultMod1Type is the default function and approximation technique for the homomorphic modular reduction polynomial.
-	DefaultMod1Type = hefloat.CosDiscrete
-	// DefaultLogMessageRatio is the default ratio between Q[0] and |m|.
-	DefaultLogMessageRatio = 8
-	// DefaultK is the default interval [-K+1, K-1] for the polynomial approximation of the homomorphic modular reduction.
-	DefaultK = 16
-	// DefaultMod1Degree is the default degree for the polynomial approximation of the homomorphic modular reduction.
-	DefaultMod1Degree = 30
-	// DefaultDoubleAngle is the default number of double iterations for the homomorphic modular reduction.
-	DefaultDoubleAngle = 3
-	// DefaultMod1InvDegree is the default degree of the f^-1: (x mod 1)^-1 polynomial for the homomorphic modular reduction.
-	DefaultMod1InvDegree = 0
-)
-
-var (
-	// DefaultXs is the default secret distribution of the bootstrapping parameters.
-	DefaultXs = ring.Ternary{H: 192}
-	// DefaultXe is the default error distribution of the bootstrapping parameters.
-	DefaultXe = rlwe.DefaultXe
-)
-
-type IterationsParameters struct {
-	BootstrappingPrecision []float64
+type Iterations struct {
+	BootstrappingPrecision structs.Vector[float64]
 	ReservedPrimeBitSize   int
 }
 
-// MarshalBinary returns a JSON representation of the the target ParametersLiteral struct on a slice of bytes.
-// See `Marshal` from the `encoding/json` package.
-func (p ParametersLiteral) MarshalBinary() (data []byte, err error) {
-	return json.Marshal(p)
-}
+// GetCircuitParametersLiteral returns the parameters literal of CoeffsToSlots, SlotsToCoeffs, Mod1.
+// This method will panic if the depth allocated to CoeffsToSlots or SlotsToCoeffs is larger than LogSlots.
+func (p ParametersLiteral) GetCircuitParametersLiteral(params hefloat.Parameters) (C2S, S2C hefloat.DFTMatrixLiteral, Mod1 hefloat.Mod1ParametersLiteral) {
 
-// UnmarshalBinary reads a JSON representation on the target ParametersLiteral struct.
-// See `Unmarshal` from the `encoding/json` package.
-func (p *ParametersLiteral) UnmarshalBinary(data []byte) (err error) {
-	return json.Unmarshal(data, p)
-}
+	if !p.Initialized {
+		panic(fmt.Errorf("struct was not created with [bootstrapping.NewParametersLiteral] or not set as initialized"))
+	}
 
-// GetLogN returns the LogN field of the target ParametersLiteral.
-// The default value DefaultLogN is returned if the field is nil.
-func (p ParametersLiteral) GetLogN() (LogN int) {
-	if v := p.LogN; v == nil {
-		LogN = DefaultLogN
-	} else {
-		LogN = *v
+	var hasReservedIterationPrime int
+	if p.Iterations.ReservedPrimeBitSize > 0 {
+		hasReservedIterationPrime = 1
+	}
+
+	S2CLevels := make([]int, len(p.S2C))
+	depth := 0
+	for i := range p.S2C {
+		S2CLevels[i] = len(p.S2C[i])
+		depth += S2CLevels[i]
+	}
+
+	if depth > p.LogSlots {
+		panic(fmt.Errorf("LogSlots=%d > SlotsToCoeffs depth=%d", p.LogSlots, depth))
+	}
+
+	S2C = hefloat.DFTMatrixLiteral{
+		Type:     hefloat.HomomorphicDecode,
+		LogSlots: p.LogSlots,
+		Format:   hefloat.RepackImagAsReal,
+		LevelQ:   params.MaxLevel() + len(S2CLevels) + hasReservedIterationPrime,
+		Levels:   S2CLevels,
+	}
+
+	Mod1 = hefloat.Mod1ParametersLiteral{
+		LogScale:        p.Mod1LogScale,
+		Mod1Type:        p.Mod1Type,
+		Mod1Degree:      p.Mod1Degree,
+		DoubleAngle:     p.DoubleAngle,
+		Mod1Interval:    p.Mod1Interval,
+		LogMessageRatio: p.LogMessageRatio,
+		Mod1InvDegree:   p.Mod1InvDegree,
+	}
+
+	Mod1.LevelQ = params.MaxLevel() + len(S2CLevels) + hasReservedIterationPrime + Mod1.Depth()
+
+	C2SLevels := make([]int, len(p.C2S))
+	depth = 0
+	for i := range p.C2S {
+		C2SLevels[i] = len(p.C2S[i])
+		depth += C2SLevels[i]
+	}
+
+	if depth > p.LogSlots {
+		panic(fmt.Errorf("LogSlots=%d > CoeffsToSlots depth=%d", p.LogSlots, depth))
+	}
+
+	C2S = hefloat.DFTMatrixLiteral{
+		Type:     hefloat.HomomorphicEncode,
+		Format:   hefloat.RepackImagAsReal,
+		LogSlots: p.LogSlots,
+		LevelQ:   params.MaxLevel() + hasReservedIterationPrime + len(S2CLevels) + Mod1.Depth() + len(C2SLevels),
+		Levels:   C2SLevels,
 	}
 
 	return
 }
 
-// GetDefaultXs returns the Xs field of the target ParametersLiteral.
-// The default value DefaultXs is returned if the field is nil.
-func (p ParametersLiteral) GetDefaultXs() (Xs ring.DistributionParameters) {
-	if v := p.Xs; v == nil {
-		Xs = DefaultXs
-	} else {
-		Xs = v
+// FailureProbability returns the base 2 logarithm of the failure probability of the bootstrapping parameters.
+// This method only supports Xs.(type) = *ring.Ternary and will panic otherwise.
+func (p ParametersLiteral) FailureProbability() (logfailure float64) {
+
+	if !p.Initialized {
+		panic(fmt.Errorf("[bootstrapping.ParametersLiteral] has not been initialized"))
 	}
 
-	return
-}
+	H := p.EphemeralSecretWeight
 
-// GetDefaultXe returns the Xe field of the target ParametersLiteral.
-// The default value DefaultXe is returned if the field is nil.
-func (p ParametersLiteral) GetDefaultXe() (Xe ring.DistributionParameters) {
-	if v := p.Xe; v == nil {
-		Xe = DefaultXe
-	} else {
-		Xe = v
-	}
-
-	return
-}
-
-// GetLogP returns the list of bit-size of the primes Pi (extended primes for the key-switching)
-// according to the number of #Qi (ciphertext primes).
-// The default value is 61 * max(1, floor(sqrt(#Qi))).
-func (p ParametersLiteral) GetLogP(NumberOfQi int) (LogP []int) {
-	if v := p.LogP; v == nil {
-		LogP = make([]int, utils.Max(1, int(math.Sqrt(float64(NumberOfQi)))))
-		for i := range LogP {
-			LogP[i] = 61
-		}
-	} else {
-		LogP = v
-	}
-
-	return
-}
-
-// GetLogSlots returns the LogSlots field of the target ParametersLiteral.
-// The default value LogN-1 is returned if the field is nil.
-func (p ParametersLiteral) GetLogSlots() (LogSlots int, err error) {
-
-	LogN := p.GetLogN()
-
-	if v := p.LogSlots; v == nil {
-		LogSlots = LogN - 1
-
-	} else {
-		LogSlots = *v
-
-		if LogSlots < 1 || LogSlots > LogN-1 {
-			return LogSlots, fmt.Errorf("field LogSlots cannot be smaller than 1 or greater than LogN-1")
-		}
-	}
-
-	return
-}
-
-// GetCoeffsToSlotsFactorizationDepthAndLogScales returns a copy of the CoeffsToSlotsFactorizationDepthAndLogScales field of the target ParametersLiteral.
-// The default value constructed from DefaultC2SFactorization and DefaultC2SLogScale is returned if the field is nil.
-func (p ParametersLiteral) GetCoeffsToSlotsFactorizationDepthAndLogScales(LogSlots int) (CoeffsToSlotsFactorizationDepthAndLogScales [][]int, err error) {
-	if p.CoeffsToSlotsFactorizationDepthAndLogScales == nil {
-		CoeffsToSlotsFactorizationDepthAndLogScales = make([][]int, utils.Min(DefaultCoeffsToSlotsFactorizationDepth, utils.Max(LogSlots, 1)))
-		for i := range CoeffsToSlotsFactorizationDepthAndLogScales {
-			CoeffsToSlotsFactorizationDepthAndLogScales[i] = []int{DefaultCoeffsToSlotsLogScale}
-		}
-	} else {
-		var depth int
-		for _, level := range p.CoeffsToSlotsFactorizationDepthAndLogScales {
-			for range level {
-				depth++
-				if depth > LogSlots {
-					return nil, fmt.Errorf("field CoeffsToSlotsFactorizationDepthAndLogScales cannot contain parameters for a depth > LogSlots")
-				}
-			}
-		}
-		CoeffsToSlotsFactorizationDepthAndLogScales = p.CoeffsToSlotsFactorizationDepthAndLogScales
-	}
-	return
-}
-
-// GetSlotsToCoeffsFactorizationDepthAndLogScales returns a copy of the SlotsToCoeffsFactorizationDepthAndLogScales field of the target ParametersLiteral.
-// The default value constructed from DefaultS2CFactorization and DefaultS2CLogScale is returned if the field is nil.
-func (p ParametersLiteral) GetSlotsToCoeffsFactorizationDepthAndLogScales(LogSlots int) (SlotsToCoeffsFactorizationDepthAndLogScales [][]int, err error) {
-	if p.SlotsToCoeffsFactorizationDepthAndLogScales == nil {
-		SlotsToCoeffsFactorizationDepthAndLogScales = make([][]int, utils.Min(DefaultSlotsToCoeffsFactorizationDepth, utils.Max(LogSlots, 1)))
-		for i := range SlotsToCoeffsFactorizationDepthAndLogScales {
-			SlotsToCoeffsFactorizationDepthAndLogScales[i] = []int{DefaultSlotsToCoeffsLogScale}
-		}
-	} else {
-		var depth int
-		for _, level := range p.SlotsToCoeffsFactorizationDepthAndLogScales {
-			for range level {
-				depth++
-				if depth > LogSlots {
-					return nil, fmt.Errorf("field SlotsToCoeffsFactorizationDepthAndLogScales cannot contain parameters for a depth > LogSlots")
-				}
-			}
-		}
-		SlotsToCoeffsFactorizationDepthAndLogScales = p.SlotsToCoeffsFactorizationDepthAndLogScales
-	}
-	return
-}
-
-// GetEvalMod1LogScale returns the EvalModLogScale field of the target ParametersLiteral.
-// The default value DefaultEvalModLogScale is returned if the field is nil.
-func (p ParametersLiteral) GetEvalMod1LogScale() (EvalModLogScale int, err error) {
-	if v := p.EvalModLogScale; v == nil {
-		EvalModLogScale = DefaultEvalModLogScale
-
-	} else {
-		EvalModLogScale = *v
-
-		if EvalModLogScale < 0 || EvalModLogScale > 60 {
-			return EvalModLogScale, fmt.Errorf("field EvalModLogScale cannot be smaller than 0 or greater than 60")
-		}
-	}
-
-	return
-}
-
-// GetIterationsParameters returns the IterationsParameters field of the target ParametersLiteral.
-// The default value is nil.
-func (p ParametersLiteral) GetIterationsParameters() (Iterations *IterationsParameters, err error) {
-
-	if v := p.IterationsParameters; v == nil {
-		return nil, nil
-	} else {
-
-		if len(v.BootstrappingPrecision) < 1 {
-			return nil, fmt.Errorf("field BootstrappingPrecision of IterationsParameters must be greater than 0")
-		}
-
-		for _, prec := range v.BootstrappingPrecision {
-			if prec == 0 {
-				return nil, fmt.Errorf("field BootstrappingPrecision of IterationsParameters cannot be 0")
-			}
-		}
-
-		if v.ReservedPrimeBitSize > 61 {
-			return nil, fmt.Errorf("field ReservedPrimeBitSize of IterationsParameters cannot be larger than 61")
-		}
-
-		return v, nil
-	}
-}
-
-// GetLogMessageRatio returns the LogMessageRatio field of the target ParametersLiteral.
-// The default value DefaultLogMessageRatio is returned if the field is nil.
-func (p ParametersLiteral) GetLogMessageRatio() (LogMessageRatio int, err error) {
-	if v := p.LogMessageRatio; v == nil {
-		LogMessageRatio = DefaultLogMessageRatio
-	} else {
-		LogMessageRatio = *v
-
-		if LogMessageRatio < 0 {
-			return LogMessageRatio, fmt.Errorf("field LogMessageRatio cannot be negative")
-		}
-	}
-
-	return
-}
-
-// GetK returns the K field of the target ParametersLiteral.
-// The default value DefaultK is returned if the field is nil.
-func (p ParametersLiteral) GetK() (K int, err error) {
-	if v := p.K; v == nil {
-		K = DefaultK
-	} else {
-		K = *v
-
-		if K < 0 {
-			return K, fmt.Errorf("field K cannot be negative")
-		}
-	}
-
-	return
-}
-
-// GetMod1Type returns the Mod1Type field of the target ParametersLiteral.
-// The default value DefaultMod1Type is returned if the field is nil.
-func (p ParametersLiteral) GetMod1Type() (Mod1Type hefloat.Mod1Type) {
-	return p.Mod1Type
-}
-
-// GetDoubleAngle returns the DoubleAngle field of the target ParametersLiteral.
-// The default value DefaultDoubleAngle is returned if the field is nil.
-func (p ParametersLiteral) GetDoubleAngle() (DoubleAngle int, err error) {
-
-	if v := p.DoubleAngle; v == nil {
-
-		switch p.GetMod1Type() {
-		case hefloat.SinContinuous:
-			DoubleAngle = 0
+	var P float64
+	if H == 0 {
+		switch Xs := p.Xs.(type) {
+		case *ring.Ternary:
+			P = Xs.P
 		default:
-			DoubleAngle = DefaultDoubleAngle
-		}
-
-	} else {
-		DoubleAngle = *v
-
-		if DoubleAngle < 0 {
-			return DoubleAngle, fmt.Errorf("field DoubleAngle cannot be negative")
-		}
-	}
-	return
-}
-
-// GetMod1Degree returns the Mod1Degree field of the target ParametersLiteral.
-// The default value DefaultMod1Degree is returned if the field is nil.
-func (p ParametersLiteral) GetMod1Degree() (Mod1Degree int, err error) {
-	if v := p.Mod1Degree; v == nil {
-		Mod1Degree = DefaultMod1Degree
-	} else {
-		Mod1Degree = *v
-
-		if Mod1Degree < 0 {
-			return Mod1Degree, fmt.Errorf("field Mod1Degree cannot be negative")
-		}
-	}
-	return
-}
-
-// GetMod1InvDegree returns the Mod1InvDegree field of the target ParametersLiteral.
-// The default value DefaultMod1InvDegree is returned if the field is nil.
-func (p ParametersLiteral) GetMod1InvDegree() (Mod1InvDegree int, err error) {
-	if v := p.Mod1InvDegree; v == nil {
-		Mod1InvDegree = DefaultMod1InvDegree
-	} else {
-		Mod1InvDegree = *v
-
-		if Mod1InvDegree < 0 {
-			return Mod1InvDegree, fmt.Errorf("field Mod1InvDegree cannot be negative")
+			panic(fmt.Errorf("method is only supported *ring.Ternary but Xs.(type) = %T", Xs))
 		}
 	}
 
-	return
-}
-
-// GetEphemeralSecretWeight returns the EphemeralSecretWeight field of the target ParametersLiteral.
-// The default value DefaultEphemeralSecretWeight is returned if the field is nil.
-func (p ParametersLiteral) GetEphemeralSecretWeight() (EphemeralSecretWeight int, err error) {
-	if v := p.EphemeralSecretWeight; v == nil {
-		EphemeralSecretWeight = DefaultEphemeralSecretWeight
-	} else {
-		EphemeralSecretWeight = *v
-
-		if EphemeralSecretWeight < 0 {
-			return EphemeralSecretWeight, fmt.Errorf("field EphemeralSecretWeight cannot be negative")
-		}
-	}
-	return
+	return FailureProbability(&ring.Ternary{H: H, P: P}, p.Mod1Interval, p.LogN, p.LogSlots)
 }
 
 // BitConsumption returns the expected consumption in bits of
 // bootstrapping circuit of the target ParametersLiteral.
 // The value is rounded up and thus will overestimate the value by up to 1 bit.
-func (p ParametersLiteral) BitConsumption(LogSlots int) (logQ int, err error) {
+func (p ParametersLiteral) BitConsumption() (logQ int, err error) {
 
-	var C2SLogPlaintextScale [][]int
-	if C2SLogPlaintextScale, err = p.GetCoeffsToSlotsFactorizationDepthAndLogScales(LogSlots); err != nil {
-		return
-	}
-
-	for i := range C2SLogPlaintextScale {
-		for _, logQi := range C2SLogPlaintextScale[i] {
+	for i := range p.C2S {
+		for _, logQi := range p.C2S[i] {
 			logQ += logQi
 		}
 	}
 
-	var S2CLogPlaintextScale [][]int
-	if S2CLogPlaintextScale, err = p.GetSlotsToCoeffsFactorizationDepthAndLogScales(LogSlots); err != nil {
-		return
-	}
-
-	for i := range S2CLogPlaintextScale {
-		for _, logQi := range S2CLogPlaintextScale[i] {
+	for i := range p.S2C {
+		for _, logQi := range p.S2C[i] {
 			logQ += logQi
 		}
 	}
 
-	var Mod1Degree int
-	if Mod1Degree, err = p.GetMod1Degree(); err != nil {
+	logQ += 1 + p.Mod1LogScale*(bits.Len64(uint64(p.Mod1Degree))+p.DoubleAngle+bits.Len64(uint64(p.Mod1InvDegree))) + p.Iterations.ReservedPrimeBitSize
+
+	return
+}
+
+// BinarySize returns the serialized size of the object in bytes.
+func (p ParametersLiteral) BinarySize() (size int) {
+	// p.EvalRound, p.Initialized, p.LogN, p.LogSlots,
+	// p.LogMessageRatio, p.Mod1Type, p.Mod1LogScale
+	// p.DoubleAngle, p.Mod1InvDegree
+	size += 9
+	// p.Mod1Degree, p.Mod1Interval, p.EphemeralSecretWeight
+	size += 6
+	// p.Iterations.ReservedPrimeBitSize
+	size += 8
+	size += p.LogP.BinarySize()
+	size += p.Xs.BinarySize()
+	size += p.Xe.BinarySize()
+	size += p.C2S.BinarySize()
+	size += p.S2C.BinarySize()
+	size += p.Iterations.BootstrappingPrecision.BinarySize()
+	return
+}
+
+// WriteTo writes the object on an io.Writer. It implements the io.WriterTo
+// interface, and will write exactly object.BinarySize() bytes on w.
+//
+// Unless w implements the buffer.Writer interface (see lattigo/utils/buffer/writer.go),
+// it will be wrapped into a bufio.Writer. Since this requires allocations, it
+// is preferable to pass a buffer.Writer directly:
+//
+//   - When writing multiple times to a io.Writer, it is preferable to first wrap the
+//     io.Writer in a pre-allocated bufio.Writer.
+//   - When writing to a pre-allocated var b []byte, it is preferable to pass
+//     buffer.NewBuffer(b) as w (see lattigo/utils/buffer/buffer.go).
+func (p ParametersLiteral) WriteTo(w io.Writer) (n int64, err error) {
+	switch w := w.(type) {
+	case buffer.Writer:
+
+		var inc int64
+
+		if inc, err = buffer.WriteAsUint8(w, p.Initialized); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.EvalRound); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.LogN); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.LogSlots); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.LogP.WriteTo(w); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.Xe.WriteTo(w); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.Xs.WriteTo(w); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.C2S.WriteTo(w); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.S2C.WriteTo(w); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint16(w, p.EphemeralSecretWeight); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.Iterations.BootstrappingPrecision.WriteTo(w); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint64(w, p.Iterations.ReservedPrimeBitSize); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.LogMessageRatio); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.Mod1Type); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.Mod1LogScale); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint16(w, p.Mod1Degree); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint16(w, p.Mod1Interval); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.DoubleAngle); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.WriteAsUint8(w, p.Mod1InvDegree); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		return n, w.Flush()
+	default:
+		return p.WriteTo(bufio.NewWriter(w))
+	}
+}
+
+// ReadFrom reads on the object from an io.Writer. It implements the
+// io.ReaderFrom interface.
+//
+// Unless r implements the buffer.Reader interface (see see lattigo/utils/buffer/reader.go),
+// it will be wrapped into a bufio.Reader. Since this requires allocation, it
+// is preferable to pass a buffer.Reader directly:
+//
+//   - When reading multiple values from a io.Reader, it is preferable to first
+//     first wrap io.Reader in a pre-allocated bufio.Reader.
+//   - When reading from a var b []byte, it is preferable to pass a buffer.NewBuffer(b)
+//     as w (see lattigo/utils/buffer/buffer.go).
+func (p *ParametersLiteral) ReadFrom(r io.Reader) (n int64, err error) {
+
+	switch r := r.(type) {
+	case buffer.Reader:
+
+		var inc int64
+
+		if inc, err = buffer.ReadAsUint8(r, &p.Initialized); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.EvalRound); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.LogN); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.LogSlots); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.LogP.ReadFrom(r); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if p.Xe, inc, err = ring.DistributionParametersFromReader(r); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if p.Xs, inc, err = ring.DistributionParametersFromReader(r); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.C2S.ReadFrom(r); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.S2C.ReadFrom(r); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint16(r, &p.EphemeralSecretWeight); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = p.Iterations.BootstrappingPrecision.ReadFrom(r); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint64(r, &p.Iterations.ReservedPrimeBitSize); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.LogMessageRatio); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.Mod1Type); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.Mod1LogScale); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint16(r, &p.Mod1Degree); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint16(r, &p.Mod1Interval); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.DoubleAngle); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
+		if inc, err = buffer.ReadAsUint8(r, &p.Mod1InvDegree); err != nil {
+			return n + inc, err
+		}
+
+		n += inc
+
 		return
+
+	default:
+		return p.ReadFrom(bufio.NewReader(r))
 	}
+}
 
-	var EvalModLogPlaintextScale int
-	if EvalModLogPlaintextScale, err = p.GetEvalMod1LogScale(); err != nil {
-		return
-	}
+// MarshalBinary encodes the object into a binary form on a newly allocated slice of bytes.
+func (p ParametersLiteral) MarshalBinary() (data []byte, err error) {
+	buf := buffer.NewBufferSize(p.BinarySize())
+	_, err = p.WriteTo(buf)
+	return buf.Bytes(), err
+}
 
-	var DoubleAngle int
-	if DoubleAngle, err = p.GetDoubleAngle(); err != nil {
-		return
-	}
-
-	var Mod1InvDegree int
-	if Mod1InvDegree, err = p.GetMod1InvDegree(); err != nil {
-		return
-	}
-
-	var Iterations *IterationsParameters
-	if Iterations, err = p.GetIterationsParameters(); err != nil {
-		return
-	}
-
-	var ReservedPrimeBitSize int
-	if Iterations != nil {
-		ReservedPrimeBitSize = Iterations.ReservedPrimeBitSize
-	}
-
-	logQ += 1 + EvalModLogPlaintextScale*(bits.Len64(uint64(Mod1Degree))+DoubleAngle+bits.Len64(uint64(Mod1InvDegree))) + ReservedPrimeBitSize
-
+// UnmarshalBinary decodes a slice of bytes generated by
+// MarshalBinary or WriteTo on the object.
+func (p *ParametersLiteral) UnmarshalBinary(data []byte) (err error) {
+	_, err = p.ReadFrom(buffer.NewBuffer(data))
 	return
 }

@@ -2,194 +2,186 @@ package mheint
 
 import (
 	"fmt"
+	"math/rand/v2"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/heint"
-	"github.com/tuneinsight/lattigo/v5/mhe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
+	"github.com/Pro7ech/lattigo/he/heint"
+	"github.com/Pro7ech/lattigo/mhe"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 )
 
 // EncToShareProtocol is the structure storing the parameters and temporary buffers
 // required by the encryption-to-shares protocol.
 type EncToShareProtocol struct {
-	mhe.KeySwitchProtocol
+	mhe.KeySwitchingProtocol[rlwe.SecretKey]
 	params heint.Parameters
 
-	maskSampler *ring.UniformSampler
-	encoder     *heint.Encoder
+	xTSampler func(n uint64) uint64
+	encoder   *heint.Encoder
 
-	zero              *rlwe.SecretKey
-	tmpPlaintextRingT ring.Poly
-	tmpPlaintextRingQ ring.Poly
+	zero *rlwe.SecretKey
+	bufT []uint64
+	bufQ ring.RNSPoly
 }
 
-func NewAdditiveShare(params heint.Parameters) mhe.AdditiveShare {
-	return mhe.NewAdditiveShare(params.RingT())
+func NewAdditiveShare(params heint.Parameters) *mhe.AdditiveShare {
+	return mhe.NewAdditiveShare(params.RT.N)
 }
 
 // ShallowCopy creates a shallow copy of EncToShareProtocol in which all the read-only data-structures are
 // shared with the receiver and the temporary buffers are reallocated. The receiver and the returned
 // EncToShareProtocol can be used concurrently.
-func (e2s EncToShareProtocol) ShallowCopy() EncToShareProtocol {
+func (e2s EncToShareProtocol) ShallowCopy() *EncToShareProtocol {
 
 	params := e2s.params
 
-	prng, err := sampling.NewPRNG()
-
-	// Sanity check, this error should not happen.
-	if err != nil {
-		panic(err)
-	}
-
-	return EncToShareProtocol{
-		KeySwitchProtocol: e2s.KeySwitchProtocol.ShallowCopy(),
-		params:            e2s.params,
-		maskSampler:       ring.NewUniformSampler(prng, params.RingT()),
-		encoder:           e2s.encoder.ShallowCopy(),
-		zero:              e2s.zero,
-		tmpPlaintextRingT: params.RingT().NewPoly(),
-		tmpPlaintextRingQ: params.RingQ().NewPoly(),
+	return &EncToShareProtocol{
+		KeySwitchingProtocol: *e2s.KeySwitchingProtocol.ShallowCopy(),
+		params:               params,
+		/* #nosec G404 -- source is cryptographically secure  */
+		xTSampler: rand.New(sampling.NewSource(sampling.NewSeed())).Uint64N,
+		encoder:   e2s.encoder.ShallowCopy(),
+		zero:      e2s.zero,
+		bufQ:      params.RingQ().NewRNSPoly(),
+		bufT:      make([]uint64, params.MaxSlots()),
 	}
 }
 
 // NewEncToShareProtocol creates a new EncToShareProtocol struct from the passed heint.Parameters.
-func NewEncToShareProtocol(params heint.Parameters, noiseFlooding ring.DistributionParameters) (EncToShareProtocol, error) {
-	e2s := EncToShareProtocol{}
-
-	var err error
-	if e2s.KeySwitchProtocol, err = mhe.NewKeySwitchProtocol(params.Parameters, noiseFlooding); err != nil {
-		return EncToShareProtocol{}, err
+func NewEncToShareProtocol(params heint.Parameters) *EncToShareProtocol {
+	return &EncToShareProtocol{
+		KeySwitchingProtocol: *mhe.NewKeySwitchingProtocol[rlwe.SecretKey](params.Parameters),
+		params:               params,
+		encoder:              heint.NewEncoder(params),
+		/* #nosec G404 -- source is cryptographically secure  */
+		xTSampler: rand.New(sampling.NewSource(sampling.NewSeed())).Uint64N,
+		zero:      rlwe.NewSecretKey(params.Parameters),
+		bufQ:      params.RingQ().NewRNSPoly(),
+		bufT:      make([]uint64, params.MaxSlots()),
 	}
-
-	e2s.params = params
-	e2s.encoder = heint.NewEncoder(params)
-	prng, err := sampling.NewPRNG()
-
-	// Sanity check, this error should not happen.
-	if err != nil {
-		panic(err)
-	}
-
-	e2s.maskSampler = ring.NewUniformSampler(prng, params.RingT())
-
-	e2s.zero = rlwe.NewSecretKey(params.Parameters)
-	e2s.tmpPlaintextRingQ = params.RingQ().NewPoly()
-	e2s.tmpPlaintextRingT = params.RingT().NewPoly()
-	return e2s, nil
 }
 
-// AllocateShare allocates a share of the EncToShare protocol
-func (e2s EncToShareProtocol) AllocateShare(level int) (share mhe.KeySwitchShare) {
-	return e2s.KeySwitchProtocol.AllocateShare(level)
+// Allocate allocates a share of the EncToShare protocol
+func (e2s EncToShareProtocol) Allocate(level int) (share *mhe.KeySwitchingShare) {
+	return e2s.KeySwitchingProtocol.Allocate(level)
 }
 
-// GenShare generates a party's share in the encryption-to-shares protocol. This share consist in the additive secret-share of the party
+// Gen generates a party's share in the encryption-to-shares protocol. This share consist in the additive secret-share of the party
 // which is written in secretShareOut and in the public masked-decryption share written in publicShareOut.
 // ct1 is degree 1 element of a rlwe.Ciphertext, i.e. rlwe.Ciphertext.Value[1].
-func (e2s EncToShareProtocol) GenShare(sk *rlwe.SecretKey, ct *rlwe.Ciphertext, secretShareOut *mhe.AdditiveShare, publicShareOut *mhe.KeySwitchShare) {
-	level := utils.Min(ct.Level(), publicShareOut.Value.Level())
-	e2s.KeySwitchProtocol.GenShare(sk, e2s.zero, ct, publicShareOut)
-	e2s.maskSampler.Read(secretShareOut.Value)
-	e2s.encoder.RingT2Q(level, true, secretShareOut.Value, e2s.tmpPlaintextRingQ)
+func (e2s EncToShareProtocol) Gen(sk *rlwe.SecretKey, ct *rlwe.Ciphertext, secretShareOut *mhe.AdditiveShare, publicShareOut *mhe.KeySwitchingShare) (err error) {
+	level := min(ct.Level(), publicShareOut.Vector.Level())
+	if err = e2s.KeySwitchingProtocol.Gen(sk, e2s.zero, 0, ct, publicShareOut); err != nil {
+		return
+	}
+
+	s := e2s.xTSampler
+	v := secretShareOut.Value
+	t := e2s.params.PlaintextModulus()
+
+	for i := range v {
+		v[i] = s(t)
+	}
+
+	e2s.encoder.RingT2Q(level, true, secretShareOut.Value, e2s.bufQ)
 	ringQ := e2s.params.RingQ().AtLevel(level)
-	ringQ.NTT(e2s.tmpPlaintextRingQ, e2s.tmpPlaintextRingQ)
-	ringQ.Sub(publicShareOut.Value, e2s.tmpPlaintextRingQ, publicShareOut.Value)
+	ringQ.NTT(e2s.bufQ, e2s.bufQ)
+	ringQ.Sub(publicShareOut.Vector.Q[0], e2s.bufQ, publicShareOut.Vector.Q[0])
+
+	return
 }
 
-// GetShare is the final step of the encryption-to-share protocol. It performs the masked decryption of the target ciphertext followed by a
+// Finalize is the final step of the encryption-to-share protocol. It performs the masked decryption of the target ciphertext followed by a
 // the removal of the caller's secretShare as generated in the GenShare method.
 // If the caller is not secret-key-share holder (i.e., didn't generate a decryption share), `secretShare` can be set to nil.
 // Therefore, in order to obtain an additive sharing of the message, only one party should call this method, and the other parties should use
 // the secretShareOut output of the GenShare method.
-func (e2s EncToShareProtocol) GetShare(secretShare *mhe.AdditiveShare, aggregatePublicShare mhe.KeySwitchShare, ct *rlwe.Ciphertext, secretShareOut *mhe.AdditiveShare) {
-	level := utils.Min(ct.Level(), aggregatePublicShare.Value.Level())
+func (e2s EncToShareProtocol) Finalize(secretShare *mhe.AdditiveShare, aggregatePublicShare *mhe.KeySwitchingShare, ct *rlwe.Ciphertext, secretShareOut *mhe.AdditiveShare) {
+	level := min(ct.Level(), aggregatePublicShare.Vector.Level())
 	ringQ := e2s.params.RingQ().AtLevel(level)
-	ringQ.Add(aggregatePublicShare.Value, ct.Value[0], e2s.tmpPlaintextRingQ)
-	ringQ.INTT(e2s.tmpPlaintextRingQ, e2s.tmpPlaintextRingQ)
-	e2s.encoder.RingQ2T(level, true, e2s.tmpPlaintextRingQ, e2s.tmpPlaintextRingT)
+	ringQ.Add(aggregatePublicShare.Vector.Q[0], ct.Q[0], e2s.bufQ)
+	ringQ.INTT(e2s.bufQ, e2s.bufQ)
+	e2s.encoder.RingQ2T(level, true, e2s.bufQ, e2s.bufT)
 	if secretShare != nil {
-		e2s.params.RingT().Add(secretShare.Value, e2s.tmpPlaintextRingT, secretShareOut.Value)
+		e2s.params.RT.Add(secretShare.Value, e2s.bufT, secretShareOut.Value)
 	} else {
-		secretShareOut.Value.Copy(e2s.tmpPlaintextRingT)
+		copy(secretShareOut.Value, e2s.bufT)
 	}
 }
 
 // ShareToEncProtocol is the structure storing the parameters and temporary buffers
 // required by the shares-to-encryption protocol.
 type ShareToEncProtocol struct {
-	mhe.KeySwitchProtocol
+	mhe.KeySwitchingProtocol[rlwe.SecretKey]
 	params heint.Parameters
 
 	encoder *heint.Encoder
 
-	zero              *rlwe.SecretKey
-	tmpPlaintextRingQ ring.Poly
+	zero *rlwe.SecretKey
+	bufQ ring.RNSPoly
 }
 
 // NewShareToEncProtocol creates a new ShareToEncProtocol struct from the passed integer parameters.
-func NewShareToEncProtocol(params heint.Parameters, noiseFlooding ring.DistributionParameters) (ShareToEncProtocol, error) {
-	s2e := ShareToEncProtocol{}
-
-	var err error
-	if s2e.KeySwitchProtocol, err = mhe.NewKeySwitchProtocol(params.Parameters, noiseFlooding); err != nil {
-		return ShareToEncProtocol{}, err
+func NewShareToEncProtocol(params heint.Parameters) *ShareToEncProtocol {
+	return &ShareToEncProtocol{
+		KeySwitchingProtocol: *mhe.NewKeySwitchingProtocol[rlwe.SecretKey](params.Parameters),
+		params:               params,
+		encoder:              heint.NewEncoder(params),
+		zero:                 rlwe.NewSecretKey(params.Parameters),
+		bufQ:                 params.RingQ().NewRNSPoly(),
 	}
-
-	s2e.params = params
-	s2e.encoder = heint.NewEncoder(params)
-	s2e.zero = rlwe.NewSecretKey(params.Parameters)
-	s2e.tmpPlaintextRingQ = params.RingQ().NewPoly()
-	return s2e, nil
 }
 
-// AllocateShare allocates a share of the ShareToEnc protocol
-func (s2e ShareToEncProtocol) AllocateShare(level int) (share mhe.KeySwitchShare) {
-	return s2e.KeySwitchProtocol.AllocateShare(level)
+// Allocate allocates a share of the ShareToEnc protocol
+func (s2e ShareToEncProtocol) Allocate(level int) (share *mhe.KeySwitchingShare) {
+	return s2e.KeySwitchingProtocol.Allocate(level)
 }
 
 // ShallowCopy creates a shallow copy of ShareToEncProtocol in which all the read-only data-structures are
 // shared with the receiver and the temporary buffers are reallocated. The receiver and the returned
 // ShareToEncProtocol can be used concurrently.
-func (s2e ShareToEncProtocol) ShallowCopy() ShareToEncProtocol {
+func (s2e ShareToEncProtocol) ShallowCopy() *ShareToEncProtocol {
 	params := s2e.params
-	return ShareToEncProtocol{
-		KeySwitchProtocol: s2e.KeySwitchProtocol.ShallowCopy(),
-		encoder:           s2e.encoder.ShallowCopy(),
-		params:            params,
-		zero:              s2e.zero,
-		tmpPlaintextRingQ: params.RingQ().NewPoly(),
+	return &ShareToEncProtocol{
+		KeySwitchingProtocol: *s2e.KeySwitchingProtocol.ShallowCopy(),
+		encoder:              s2e.encoder.ShallowCopy(),
+		params:               params,
+		zero:                 s2e.zero,
+		bufQ:                 params.RingQ().NewRNSPoly(),
 	}
 }
 
-// GenShare generates a party's in the shares-to-encryption protocol given the party's secret-key share `sk`, a common
+// Gen generates a party's in the shares-to-encryption protocol given the party's secret-key share `sk`, a common
 // polynomial sampled from the CRS `crp` and the party's secret share of the message.
-func (s2e ShareToEncProtocol) GenShare(sk *rlwe.SecretKey, crp mhe.KeySwitchCRP, secretShare mhe.AdditiveShare, c0ShareOut *mhe.KeySwitchShare) (err error) {
-
-	if crp.Value.Level() != c0ShareOut.Value.Level() {
-		return fmt.Errorf("cannot GenShare: crp and c0ShareOut level must be equal")
-	}
+func (s2e ShareToEncProtocol) Gen(sk *rlwe.SecretKey, seed [32]byte, secretShare *mhe.AdditiveShare, publicShare *mhe.KeySwitchingShare) (err error) {
 
 	ct := &rlwe.Ciphertext{}
-	ct.Value = []ring.Poly{{}, crp.Value}
+	ct.Vector = &publicShare.Vector
 	ct.MetaData = &rlwe.MetaData{}
 	ct.MetaData.IsNTT = true
-	s2e.KeySwitchProtocol.GenShare(s2e.zero, sk, ct, c0ShareOut)
-	s2e.encoder.RingT2Q(crp.Value.Level(), true, secretShare.Value, s2e.tmpPlaintextRingQ)
-	ringQ := s2e.params.RingQ().AtLevel(crp.Value.Level())
-	ringQ.NTT(s2e.tmpPlaintextRingQ, s2e.tmpPlaintextRingQ)
-	ringQ.Add(c0ShareOut.Value, s2e.tmpPlaintextRingQ, c0ShareOut.Value)
+
+	if err = s2e.WithKey(sk).WithSeededPublicRandomness(seed).EncryptZero(ct); err != nil {
+		return
+	}
+	publicShare.Seed = seed
+
+	s2e.encoder.RingT2Q(ct.Level(), true, secretShare.Value, s2e.bufQ)
+	rQ := s2e.params.RingQ().AtLevel(ct.Level())
+	rQ.NTT(s2e.bufQ, s2e.bufQ)
+	rQ.Add(publicShare.Q[0], s2e.bufQ, publicShare.Q[0])
 	return
 }
 
-// GetEncryption computes the final encryption of the secret-shared message when provided with the aggregation `c0Agg` of the parties'
+// Finalize computes the final encryption of the secret-shared message when provided with the aggregation `c0Agg` of the parties'
 // shares in the protocol and with the common, CRS-sampled polynomial `crp`.
-func (s2e ShareToEncProtocol) GetEncryption(c0Agg mhe.KeySwitchShare, crp mhe.KeySwitchCRP, opOut *rlwe.Ciphertext) (err error) {
+func (s2e ShareToEncProtocol) Finalize(share *mhe.KeySwitchingShare, opOut *rlwe.Ciphertext) (err error) {
 	if opOut.Degree() != 1 {
-		return fmt.Errorf("cannot GetEncryption: opOut must have degree 1")
+		return fmt.Errorf("opOut must have degree 1")
 	}
-	opOut.Value[0].Copy(c0Agg.Value)
-	opOut.Value[1].Copy(crp.Value)
+	opOut.Q[0].Copy(&share.Q[0])
+	p := ring.Point{Q: opOut.Q[1]}
+	p.Randomize(s2e.params.RingQ(), s2e.params.RingP(), sampling.NewSource(share.Seed))
+
 	return
 }

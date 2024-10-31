@@ -7,7 +7,7 @@ import (
 )
 
 type Number interface {
-	cs.Complex | cs.Float | cs.Integer
+	cs.Complex | cs.Float | cs.Integer | bool
 }
 
 // Pointy creates a new T variable and returns its pointer.

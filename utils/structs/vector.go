@@ -5,19 +5,44 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils/buffer"
 )
 
 // Vector is a struct wrapping a slice of components of type T.
 // T can be:
 //   - uint, uint64, uint32, uint16, uint8/byte, int, int64, int32, int16, int8, float64, float32.
-//   - Or any object that implements CopyNewer, CopyNewer, io.WriterTo or io.ReaderFrom depending on
+//   - Or any object that implements Cloner, Cloner, io.WriterTo or io.ReaderFrom depending on
 //     the method called.
 type Vector[T any] []T
 
-// CopyNew returns a deep copy of the object.
-// If T is a struct, this method requires that T implements CopyNewer.
-func (v Vector[T]) CopyNew() (vcpy Vector[T]) {
+// Size returns the size of the receiver.
+func (v Vector[T]) Size() int {
+	return len(v)
+}
+
+// Copy copies the operand on the receiver, up to the
+// maximum available size between the two.
+func (v Vector[T]) Copy(other Vector[T]) {
+
+	var t T
+	switch any(t).(type) {
+	case uint, uint64, uint32, uint16, uint8, int, int64, int32, int16, int8, float64, float32:
+		copy(v, other)
+	default:
+
+		if _, isCopyable := any(&t).(Copyer[T]); !isCopyable {
+			panic(fmt.Errorf("component of type %T does not comply to %T", t, new(Copyer[T])))
+		}
+
+		for i := 0; i < min(v.Size(), other.Size()); i++ {
+			any(&v[i]).(Copyer[T]).Copy(&other[i])
+		}
+	}
+}
+
+// Clone returns a deep copy of the object.
+// If T is a struct, this method requires that T implements Cloner.
+func (v Vector[T]) Clone() (vcpy Vector[T]) {
 
 	var t T
 	switch any(t).(type) {
@@ -25,14 +50,29 @@ func (v Vector[T]) CopyNew() (vcpy Vector[T]) {
 		vcpy = Vector[T](make([]T, len(v)))
 		copy(vcpy, v)
 	default:
-		if _, isCopiable := any(t).(CopyNewer[T]); !isCopiable {
-			panic(fmt.Errorf("vector component of type %T does not comply to %T", t, new(CopyNewer[T])))
+		if _, isClonable := any(&t).(Cloner[T]); !isClonable {
+			panic(fmt.Errorf("component of type %T does not comply to %T", t, new(Cloner[T])))
 		}
 
 		vcpy = Vector[T](make([]T, len(v)))
 		for i := range v {
-			vcpy[i] = *any(&v[i]).(CopyNewer[T]).CopyNew()
+			vcpy[i] = *any(&v[i]).(Cloner[T]).Clone()
 		}
+	}
+
+	return
+}
+
+func (v Vector[T]) ShallowCopy() (vcpy Vector[T]) {
+
+	var t T
+	if _, isShallowCopyable := any(&t).(ShallowCopyer[T]); !isShallowCopyable {
+		panic(fmt.Errorf("component of type %T does not comply to %T", t, new(ShallowCopyer[T])))
+	}
+
+	vcpy = Vector[T](make([]T, len(v)))
+	for i := range v {
+		vcpy[i] = *any(&v[i]).(ShallowCopyer[T]).ShallowCopy()
 	}
 
 	return
@@ -255,6 +295,10 @@ func (v *Vector[T]) UnmarshalBinary(p []byte) (err error) {
 // If T is a struct, this method requires that T implements Equatable.
 func (v Vector[T]) Equal(other Vector[T]) (isEqual bool) {
 
+	if len(v) != len(other) {
+		return false
+	}
+
 	var t T
 	switch any(t).(type) {
 	case uint, uint64, int, int64, float64:
@@ -271,9 +315,8 @@ func (v Vector[T]) Equal(other Vector[T]) (isEqual bool) {
 			panic(fmt.Errorf("vector component of type %T does not comply to %T", t, new(Equatable[T])))
 		}
 
-		for i, v := range v {
-			/* #nosec G601 -- Implicit memory aliasing in for loop acknowledged */
-			if !any(&v).(Equatable[T]).Equal(&other[i]) {
+		for i := range v {
+			if !any(&v[i]).(Equatable[T]).Equal(&other[i]) {
 				return false
 			}
 		}

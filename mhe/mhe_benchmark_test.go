@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 )
 
 func BenchmarkMHE(b *testing.B) {
@@ -43,137 +43,123 @@ func BenchmarkMHE(b *testing.B) {
 
 				levelQ := params.MaxLevelQ()
 				levelP := params.MaxLevelP()
-				bpw2 := paramsLit.BaseTwoDecomposition
+				dd := paramsLit.DigitDecomposition
 
-				benchPublicKeyGen(params, levelQ, levelP, bpw2, b)
-				benchRelinearizationKeyGen(params, levelQ, levelP, bpw2, b)
-				benchRotKeyGen(params, levelQ, levelP, bpw2, b)
+				benchPublicKeyGen(params, levelQ, levelP, dd, b)
+				benchRelinearizationKeyGen(params, levelQ, levelP, dd, b)
+				benchRotKeyGen(params, levelQ, levelP, dd, b)
 
 				// Varying t
 				for t := 2; t <= 19; t += thresholdInc {
-					benchThreshold(params, levelQ, levelP, bpw2, t, b)
+					benchThreshold(params, levelQ, levelP, dd, t, b)
 				}
 			}
 		}
 	}
 }
 
-func benchString(params rlwe.Parameters, opname string, levelQ, levelP, bpw2 int) string {
-	return fmt.Sprintf("%s/logN=%d/#Qi=%d/#Pi=%d/Pw2=%d/NTT=%t/RingType=%s",
+func benchString(params rlwe.Parameters, opname string, levelQ, levelP int, dd rlwe.DigitDecomposition) string {
+	return fmt.Sprintf("%s/logN=%d/#Qi=%d/#Pi=%d/Digits=%s/NTT=%t/RingType=%s",
 		opname,
 		params.LogN(),
 		levelQ+1,
 		levelP+1,
-		bpw2,
+		dd.ToString(),
 		params.NTTFlag(),
 		params.RingType())
 }
 
-func benchPublicKeyGen(params rlwe.Parameters, levelQ, levelP, bpw2 int, b *testing.B) {
+func benchPublicKeyGen(params rlwe.Parameters, levelQ, levelP int, dd rlwe.DigitDecomposition, b *testing.B) {
 
-	ckg := NewPublicKeyGenProtocol(params)
+	ckg := NewPublicKeyProtocol(params)
 	sk := rlwe.NewKeyGenerator(params).GenSecretKeyNew()
-	s1 := ckg.AllocateShare()
-	crs, _ := sampling.NewPRNG()
+	share := ckg.Allocate()
 
-	crp := ckg.SampleCRP(crs)
-
-	b.Run(benchString(params, "PublicKeyGen/Round1/Gen", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "PublicKeyGen/Round1/Gen", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			ckg.GenShare(sk, crp, &s1)
+			ckg.Gen(sk, sampling.NewSeed(), share)
 		}
 	})
 
-	b.Run(benchString(params, "PublicKeyGen/Round1/Agg", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "PublicKeyGen/Round1/Agg", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			ckg.AggregateShares(s1, s1, &s1)
+			ckg.Aggregate(share, share, share)
 		}
 	})
 
 	pk := rlwe.NewPublicKey(params)
-	b.Run(benchString(params, "PublicKeyGen/Finalize", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "PublicKeyGen/Finalize", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			ckg.GenPublicKey(s1, crp, pk)
+			ckg.Finalize(share, pk)
 		}
 	})
 }
 
-func benchRelinearizationKeyGen(params rlwe.Parameters, levelQ, levelP, bpw2 int, b *testing.B) {
+func benchRelinearizationKeyGen(params rlwe.Parameters, levelQ, levelP int, dd rlwe.DigitDecomposition, b *testing.B) {
 
-	evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), BaseTwoDecomposition: utils.Pointy(bpw2)}
+	evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), DigitDecomposition: dd}
 
-	rkg := NewRelinearizationKeyGenProtocol(params)
-	sk := rlwe.NewKeyGenerator(params).GenSecretKeyNew()
-	ephSk, share1, share2 := rkg.AllocateShare(evkParams)
+	rkg := NewRelinearizationKeyProtocol(params)
+	sk, pk := rlwe.NewKeyGenerator(params).GenKeyPairNew()
+	share := rkg.Allocate(evkParams)
 	rlk := rlwe.NewRelinearizationKey(params, evkParams)
-	crs, _ := sampling.NewPRNG()
 
-	crp := rkg.SampleCRP(crs, evkParams)
-
-	b.Run(benchString(params, "RelinearizationKeyGen/GenRound1", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "RelinearizationKeyGen/Gen", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			rkg.GenShareRoundOne(sk, crp, ephSk, &share1)
+			rkg.Gen(sk, pk, share)
 		}
 	})
 
-	b.Run(benchString(params, "RelinearizationKeyGen/GenRound2", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "RelinearizationKeyGen/Agg", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			rkg.GenShareRoundTwo(ephSk, sk, share1, &share2)
+			rkg.Aggregate(share, share, share)
 		}
 	})
 
-	b.Run(benchString(params, "RelinearizationKeyGen/Agg", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "RelinearizationKeyGen/Finalize", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			rkg.AggregateShares(share1, share1, &share1)
-		}
-	})
-
-	b.Run(benchString(params, "RelinearizationKeyGen/Finalize", levelQ, levelP, bpw2), func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			rkg.GenRelinearizationKey(share1, share2, rlk)
+			rkg.Finalize(share, rlk)
 		}
 	})
 }
 
-func benchRotKeyGen(params rlwe.Parameters, levelQ, levelP, bpw2 int, b *testing.B) {
+func benchRotKeyGen(params rlwe.Parameters, levelQ, levelP int, dd rlwe.DigitDecomposition, b *testing.B) {
 
-	evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), BaseTwoDecomposition: utils.Pointy(bpw2)}
+	evkParams := rlwe.EvaluationKeyParameters{LevelQ: utils.Pointy(levelQ), LevelP: utils.Pointy(levelP), DigitDecomposition: dd}
 
-	rtg := NewGaloisKeyGenProtocol(params)
+	rtg := NewGaloisKeyProtocol(params)
 	sk := rlwe.NewKeyGenerator(params).GenSecretKeyNew()
-	share := rtg.AllocateShare(evkParams)
-	crs, _ := sampling.NewPRNG()
-	crp := rtg.SampleCRP(crs, evkParams)
+	share := rtg.Allocate(evkParams)
 
-	b.Run(benchString(params, "RotKeyGen/Round1/Gen", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "RotKeyGen/Round1/Gen", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			rtg.GenShare(sk, params.GaloisElement(1), crp, &share)
+			rtg.Gen(sk, params.GaloisElement(1), sampling.NewSeed(), share)
 		}
 	})
 
-	b.Run(benchString(params, "RotKeyGen/Round1/Agg", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "RotKeyGen/Round1/Agg", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			rtg.AggregateShares(share, share, &share)
+			rtg.Aggregate(share, share, share)
 		}
 	})
 
 	gkey := rlwe.NewGaloisKey(params, evkParams)
-	b.Run(benchString(params, "RotKeyGen/Finalize", levelQ, levelP, bpw2), func(b *testing.B) {
+	b.Run(benchString(params, "RotKeyGen/Finalize", levelQ, levelP, dd), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			rtg.GenGaloisKey(share, crp, gkey)
+			rtg.Finalize(share, gkey)
 		}
 	})
 }
 
-func benchThreshold(params rlwe.Parameters, levelQ, levelP, bpw2 int, t int, b *testing.B) {
+func benchThreshold(params rlwe.Parameters, levelQ, levelP int, dd rlwe.DigitDecomposition, t int, b *testing.B) {
 
 	type Party struct {
 		Thresholdizer
 		Combiner
-		gen ShamirPolynomial
+		gen *ShamirPolynomial
 		s   *rlwe.SecretKey
 		sk  *rlwe.SecretKey
-		tsk ShamirSecretShare
+		tsk *ShamirSecretShare
 	}
 
 	shamirPks := make([]ShamirPublicPoint, t)
@@ -183,35 +169,35 @@ func benchThreshold(params rlwe.Parameters, levelQ, levelP, bpw2 int, t int, b *
 
 	p := new(Party)
 	p.s = rlwe.NewSecretKey(params)
-	p.Thresholdizer = NewThresholdizer(params)
-	p.tsk = p.Thresholdizer.AllocateThresholdSecretShare()
+	p.Thresholdizer = *NewThresholdizer(params)
+	p.tsk = p.Thresholdizer.Allocate()
 	p.sk = rlwe.NewSecretKey(params)
 
-	b.Run(benchString(params, "Thresholdizer/GenShamirPolynomial", levelQ, levelP, bpw2)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
+	b.Run(benchString(params, "Thresholdizer/Gen", levelQ, levelP, dd)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			p.gen, _ = p.Thresholdizer.GenShamirPolynomial(t, p.s)
+			p.gen, _ = p.Thresholdizer.Gen(t, p.s)
 		}
 	})
 
-	shamirShare := p.Thresholdizer.AllocateThresholdSecretShare()
+	shamirShare := p.Thresholdizer.Allocate()
 
-	b.Run(benchString(params, "Thresholdizer/GenShamirSecretShare", levelQ, levelP, bpw2)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
+	b.Run(benchString(params, "Thresholdizer/Finalize", levelQ, levelP, dd)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			p.Thresholdizer.GenShamirSecretShare(shamirPks[0], p.gen, &shamirShare)
+			p.Thresholdizer.Finalize(shamirPks[0], p.gen, shamirShare)
 		}
 	})
 
-	b.Run(benchString(params, "Thresholdizer/AggregateShares", levelQ, levelP, bpw2)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
+	b.Run(benchString(params, "Thresholdizer/Aggregate", levelQ, levelP, dd)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			p.Thresholdizer.AggregateShares(shamirShare, shamirShare, &shamirShare)
+			p.Thresholdizer.Aggregate(shamirShare, shamirShare, shamirShare)
 		}
 	})
 
-	p.Combiner = NewCombiner(params, shamirPks[0], shamirPks, t)
+	p.Combiner = *NewCombiner(params, shamirPks[0], shamirPks, t)
 
-	b.Run(benchString(params, "Combiner/GenAdditiveShare", levelQ, levelP, bpw2)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
+	b.Run(benchString(params, "Combiner/Finalize", levelQ, levelP, dd)+fmt.Sprintf("/threshold=%d", t), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			p.Combiner.GenAdditiveShare(shamirPks, shamirPks[0], p.tsk, p.sk)
+			p.Combiner.Finalize(shamirPks, shamirPks[0], p.tsk, p.sk)
 		}
 	})
 }

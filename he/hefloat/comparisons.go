@@ -3,10 +3,9 @@ package hefloat
 import (
 	"math/big"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/he"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // ComparisonEvaluator is an evaluator providing an API for homomorphic comparisons.
@@ -63,7 +62,7 @@ var DefaultMinimaxCompositePolynomialForSign = [][]string{
 // Sign evaluates f(x) = 1 if x > 0, -1 if x < 0, else 0.
 // This will ensure that sign.Scale = params.DefaultScale().
 func (eval ComparisonEvaluator) Sign(op0 *rlwe.Ciphertext) (sign *rlwe.Ciphertext, err error) {
-	return eval.Evaluate(op0, eval.MinimaxCompositeSignPolynomial)
+	return eval.Evaluate(op0, eval.MinimaxCompositeSignPolynomial, op0.Scale)
 }
 
 // Step evaluates f(x) = 1 if x > 0, 0 if x < 0, else 0.5 (i.e. (sign+1)/2).
@@ -83,13 +82,13 @@ func (eval ComparisonEvaluator) Step(op0 *rlwe.Ciphertext) (step *rlwe.Ciphertex
 	// (x+1)/2
 	lastPoly := eval.MinimaxCompositeSignPolynomial[n-1].Clone()
 	for i := range lastPoly.Coeffs {
-		lastPoly.Coeffs[i][0].Mul(lastPoly.Coeffs[i][0], half)
+		lastPoly.Coeffs[i][0].Mul(&lastPoly.Coeffs[i][0], half)
 	}
-	lastPoly.Coeffs[0][0].Add(lastPoly.Coeffs[0][0], half)
+	lastPoly.Coeffs[0][0].Add(&lastPoly.Coeffs[0][0], half)
 
-	stepPoly[n-1] = lastPoly
+	stepPoly[n-1] = *lastPoly
 
-	return eval.Evaluate(op0, stepPoly)
+	return eval.Evaluate(op0, stepPoly, op0.Scale)
 }
 
 // Max returns the smooth maximum of op0 and op1, which is defined as: op0 * x + op1 * (1-x) where x = step(diff = op0-op1).
@@ -166,7 +165,7 @@ func (eval ComparisonEvaluator) stepdiff(op0, op1 *rlwe.Ciphertext) (stepdiff *r
 	}
 
 	// Extremum gate: op0 * step + op1 * (1 - step) = step * diff + op1
-	level := utils.Min(diff.Level(), step.Level())
+	level := min(diff.Level(), step.Level())
 
 	ratio := rlwe.NewScale(1)
 	for i := 0; i < params.LevelsConsumedPerRescaling(); i++ {

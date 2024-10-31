@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // IsPrime applies the Baillie-PSW, which is 100% accurate for numbers bellow 2^64.

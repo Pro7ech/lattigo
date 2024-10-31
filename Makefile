@@ -4,8 +4,8 @@
 test_gotest:
 	go test -timeout=0 ./...
 
-.PHONY: static_check
-static_check: check_tools
+.PHONY: lint
+lint: check_tools
 	@echo Checking correct formatting of files
 	
 	@FMTOUT=$$(go fmt ./...); \
@@ -34,7 +34,7 @@ static_check: check_tools
 		false;\
     fi
 	
-	@STATICCHECKOUT=$$(staticcheck -go 1.20 -checks all ./...); \
+	@STATICCHECKOUT=$$(staticcheck -go 1.23 -checks all ./...); \
 	if [ -z "$$STATICCHECKOUT" ]; then\
         echo "staticcheck: OK";\
 	else \
@@ -51,13 +51,13 @@ static_check: check_tools
 test: test_gotest
 
 .PHONY: ci_test
-ci_test: static_check test_gotest
+ci_test: lint test_gotest
 
 EXECUTABLES = goimports staticcheck
 .PHONY: get_tools
 get_tools:
 	go install golang.org/x/tools/cmd/goimports@latest
-	go install honnef.co/go/tools/cmd/staticcheck@2023.1.5
+	go install honnef.co/go/tools/cmd/staticcheck@latest
 
 .PHONY: check_tools
 check_tools:

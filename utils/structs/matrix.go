@@ -5,50 +5,44 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils"
+	"github.com/Pro7ech/lattigo/utils/buffer"
 )
 
 // Matrix is a struct wrapping a double slice of components of type T.
 // T can be:
 //   - uint, uint64, uint32, uint16, uint8/byte, int, int64, int32, int16, int8, float64, float32.
-//   - Or any object that implements CopyNewer, CopyNewer, BinarySizer, io.WriterTo or io.ReaderFrom
+//   - Or any object that implements Cloner, Cloner, BinarySizer, io.WriterTo or io.ReaderFrom
 //     depending on the method called.
 type Matrix[T any] [][]T
 
-// CopyNew returns a deep copy of the object.
-// If T is a struct, this method requires that T implements CopyNewer.
-func (m Matrix[T]) CopyNew() (mcpy Matrix[T]) {
+func (m Matrix[T]) Rows() (rows int) {
+	return len(m)
+}
 
-	var t T
-	switch any(t).(type) {
-	case uint, uint64, uint32, uint16, uint8, int, int64, int32, int16, int8, float64, float32:
-
-		mcpy = Matrix[T](make([][]T, len(m)))
-
-		for i := range m {
-
-			mcpy[i] = make([]T, len(m[i]))
-			copy(mcpy[i], m[i])
-		}
-
-	default:
-		if _, isCopyable := any(t).(CopyNewer[T]); !isCopyable {
-			panic(fmt.Errorf("matrix component of type %T does not comply to %T", t, new(CopyNewer[T])))
-		}
-
-		mcpy = Matrix[T](make([][]T, len(m)))
-
-		for i := range m {
-
-			mcpy[i] = make([]T, len(m[i]))
-
-			for j := range m[i] {
-				mcpy[i][j] = *any(&m[i][j]).(CopyNewer[T]).CopyNew()
-			}
-		}
+func (m Matrix[T]) Cols() (cols []int) {
+	cols = make([]int, m.Rows())
+	for i := 0; i < m.Rows(); i++ {
+		cols[i] = len(m[i])
 	}
+	return
+}
 
+// Copy copies the operand on the receiver, up to the
+// maximum available size between the two.
+func (v Matrix[T]) Copy(other Matrix[T]) {
+	for i := 0; i < min(v.Rows(), other.Rows()); i++ {
+		Vector[T](v[i]).Copy(Vector[T](other[i]))
+	}
+}
+
+// Clone returns a deep copy of the object.
+// If T is a struct, this method requires that T implements Cloner.
+func (m Matrix[T]) Clone() (mcpy Matrix[T]) {
+	mcpy = Matrix[T](make([][]T, len(m)))
+	for i := range m {
+		mcpy[i] = Vector[T](m[i]).Clone()
+	}
 	return
 }
 
@@ -58,9 +52,9 @@ func (m Matrix[T]) BinarySize() (size int) {
 
 	size += 8
 
-	for _, v := range m {
+	for i := range m {
 		/* #nosec G601 -- Implicit memory aliasing in for loop acknowledged */
-		size += (*Vector[T])(&v).BinarySize()
+		size += Vector[T](m[i]).BinarySize()
 	}
 
 	return
@@ -191,5 +185,6 @@ func (m Matrix[T]) Equal(other Matrix[T]) bool {
 			return false
 		}
 	}
+
 	return true
 }

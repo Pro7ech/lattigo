@@ -7,12 +7,10 @@ import (
 	"math/big"
 	"math/bits"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/schemes/ckks"
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/he/hefloat"
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // Evaluate re-encrypts a ciphertext to a ciphertext at MaxLevel - k where k is the depth of the bootstrapping circuit.
@@ -29,17 +27,19 @@ import (
 // 3) CoeffsToSlots: homomorphic encoding
 // 4) EvalMod: homomorphic modular reduction
 // 5) SlotsToCoeffs: homomorphic decoding
-func (eval Evaluator) Evaluate(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
+func (eval *Evaluator) Evaluate(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
 
-	if eval.IterationsParameters == nil && eval.ResidualParameters.PrecisionMode() != ckks.PREC128 {
-		ctOut, _, err = eval.bootstrap(ctIn)
+	if len(eval.Iterations.BootstrappingPrecision) == 0 && eval.ResidualParameters.PrecisionMode() != hefloat.PREC128 {
+		if ctOut, _, err = eval.bootstrap(ctIn.Clone()); err != nil {
+			return
+		}
+		ctOut.Scale = eval.ResidualParameters.DefaultScale()
 		return
-
 	} else {
 
 		var errScale *rlwe.Scale
 		// [M^{d}/q1 + e^{d-logprec}]
-		if ctOut, errScale, err = eval.bootstrap(ctIn.CopyNew()); err != nil {
+		if ctOut, errScale, err = eval.bootstrap(ctIn.Clone()); err != nil {
 			return nil, err
 		}
 
@@ -54,121 +54,119 @@ func (eval Evaluator) Evaluate(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, e
 		if err = eval.Evaluator.Mul(ctOut, diffScale.BigInt(), ctOut); err != nil {
 			return nil, err
 		}
-		ctOut.Scale = ctIn.Scale
 
-		if eval.IterationsParameters != nil {
+		ctOut.Scale = eval.ResidualParameters.DefaultScale()
 
-			QiReserved := eval.BootstrappingParameters.Q()[eval.ResidualParameters.MaxLevel()+1]
+		QiReserved := eval.BootstrappingParameters.Q()[eval.ResidualParameters.MaxLevel()+1]
 
-			var totLogPrec float64
+		var totLogPrec float64
 
-			for i := 0; i < len(eval.IterationsParameters.BootstrappingPrecision); i++ {
+		for i := 0; i < len(eval.Iterations.BootstrappingPrecision); i++ {
 
-				logPrec := eval.IterationsParameters.BootstrappingPrecision[i]
+			logPrec := eval.Iterations.BootstrappingPrecision[i]
 
-				totLogPrec += logPrec
+			totLogPrec += logPrec
 
-				// prec = round(2^{logprec})
-				log2 := bignum.Log(new(big.Float).SetPrec(256).SetUint64(2))
-				log2TimesLogPrec := log2.Mul(log2, new(big.Float).SetFloat64(totLogPrec))
-				prec := new(big.Int)
-				log2TimesLogPrec.Add(bignum.Exp(log2TimesLogPrec), new(big.Float).SetFloat64(0.5)).Int(prec)
+			// prec = round(2^{logprec})
+			log2 := bignum.Log(new(big.Float).SetPrec(256).SetUint64(2))
+			log2TimesLogPrec := log2.Mul(log2, new(big.Float).SetFloat64(totLogPrec))
+			prec := new(big.Int)
+			log2TimesLogPrec.Add(bignum.Exp(log2TimesLogPrec), new(big.Float).SetFloat64(0.5)).Int(prec)
 
-				// Corrects the last iteration 2^{logprec} such that diffScale / prec * QReserved is as close to an integer as possible.
-				// This is necessary to not lose bits of precision during the last iteration is a reserved prime is used.
-				// If this correct is not done, what can happen is that there is a loss of up to 2^{logprec/2} bits from the last iteration.
-				if eval.IterationsParameters.ReservedPrimeBitSize != 0 && i == len(eval.IterationsParameters.BootstrappingPrecision)-1 {
+			// Corrects the last iteration 2^{logprec} such that diffScale / prec * QReserved is as close to an integer as possible.
+			// This is necessary to not lose bits of precision during the last iteration is a reserved prime is used.
+			// If this correct is not done, what can happen is that there is a loss of up to 2^{logprec/2} bits from the last iteration.
+			if eval.Iterations.ReservedPrimeBitSize != 0 && i == len(eval.Iterations.BootstrappingPrecision)-1 {
 
-					// 1) Computes the scale = diffScale / prec * QReserved
-					scale := new(big.Float).Quo(&diffScale.Value, new(big.Float).SetInt(prec))
-					scale.Mul(scale, new(big.Float).SetUint64(QiReserved))
+				// 1) Computes the scale = diffScale / prec * QReserved
+				scale := new(big.Float).Quo(&diffScale.Value, new(big.Float).SetInt(prec))
+				scale.Mul(scale, new(big.Float).SetUint64(QiReserved))
 
-					// 2) Finds the closest integer to scale with scale = round(scale)
-					scale.Add(scale, new(big.Float).SetFloat64(0.5))
-					tmp := new(big.Int)
-					scale.Int(tmp)
-					scale.SetInt(tmp)
+				// 2) Finds the closest integer to scale with scale = round(scale)
+				scale.Add(scale, new(big.Float).SetFloat64(0.5))
+				tmp := new(big.Int)
+				scale.Int(tmp)
+				scale.SetInt(tmp)
 
-					// 3) Computes the corrected precision = diffScale * QReserved / round(scale)
-					preccorrected := new(big.Float).Quo(&diffScale.Value, scale)
-					preccorrected.Mul(preccorrected, new(big.Float).SetUint64(QiReserved))
-					preccorrected.Add(preccorrected, new(big.Float).SetFloat64(0.5))
+				// 3) Computes the corrected precision = diffScale * QReserved / round(scale)
+				preccorrected := new(big.Float).Quo(&diffScale.Value, scale)
+				preccorrected.Mul(preccorrected, new(big.Float).SetUint64(QiReserved))
+				preccorrected.Add(preccorrected, new(big.Float).SetFloat64(0.5))
 
-					// 4) Updates with the corrected precision
-					preccorrected.Int(prec)
+				// 4) Updates with the corrected precision
+				preccorrected.Int(prec)
+			}
+
+			// round(q1/logprec)
+			scale := new(big.Int).Set(diffScale.BigInt())
+			bignum.DivRound(scale, prec, scale)
+
+			// Checks that round(q1/logprec) >= 2^{logprec}
+			requiresReservedPrime := scale.Cmp(new(big.Int).SetUint64(1)) < 0
+
+			if requiresReservedPrime && eval.Iterations.ReservedPrimeBitSize == 0 {
+				return ctOut, fmt.Errorf("warning: early stopping at iteration k=%d: reason: round(q1/2^{logprec}) < 1 and no reserverd prime was provided", i+1)
+			}
+
+			// [M^{d} + e^{d-logprec}] - [M^{d}] -> [e^{d-logprec}]
+			tmp, err := eval.Evaluator.SubNew(ctOut, ctIn)
+
+			if err != nil {
+				return nil, err
+			}
+
+			// prec * [e^{d-logprec}] -> [e^{d}]
+			if err = eval.Evaluator.Mul(tmp, prec, tmp); err != nil {
+				return nil, err
+			}
+
+			tmp.Scale = ctOut.Scale
+
+			// [e^{d}] -> [e^{d}/q1] -> [e^{d}/q1 + e'^{d-logprec}]
+			if tmp, errScale, err = eval.bootstrap(tmp); err != nil {
+				return nil, err
+			}
+
+			tmp.Scale = tmp.Scale.Mul(*errScale)
+
+			// [[e^{d}/q1 + e'^{d-logprec}] * q1/logprec -> [e^{d-logprec} + e'^{d-2logprec}*q1]
+			if eval.Iterations.ReservedPrimeBitSize == 0 {
+				if err = eval.Evaluator.Mul(tmp, scale, tmp); err != nil {
+					return nil, err
+				}
+			} else {
+
+				// Else we compute the floating point ratio
+				scale := new(big.Float).SetInt(diffScale.BigInt())
+				scale.Quo(scale, new(big.Float).SetInt(prec))
+
+				if new(big.Float).Mul(scale, new(big.Float).SetUint64(QiReserved)).Cmp(new(big.Float).SetUint64(1)) == -1 {
+					return ctOut, fmt.Errorf("warning: early stopping at iteration k=%d: reason: maximum precision achieved", i+1)
 				}
 
-				// round(q1/logprec)
-				scale := new(big.Int).Set(diffScale.BigInt())
-				bignum.DivRound(scale, prec, scale)
-
-				// Checks that round(q1/logprec) >= 2^{logprec}
-				requiresReservedPrime := scale.Cmp(new(big.Int).SetUint64(1)) < 0
-
-				if requiresReservedPrime && eval.IterationsParameters.ReservedPrimeBitSize == 0 {
-					return ctOut, fmt.Errorf("warning: early stopping at iteration k=%d: reason: round(q1/2^{logprec}) < 1 and no reserverd prime was provided", i+1)
-				}
-
-				// [M^{d} + e^{d-logprec}] - [M^{d}] -> [e^{d-logprec}]
-				tmp, err := eval.Evaluator.SubNew(ctOut, ctIn)
-
-				if err != nil {
+				// Do a scaled multiplication by the last prime
+				if err = eval.Evaluator.Mul(tmp, scale, tmp); err != nil {
 					return nil, err
 				}
 
-				// prec * [e^{d-logprec}] -> [e^{d}]
-				if err = eval.Evaluator.Mul(tmp, prec, tmp); err != nil {
-					return nil, err
-				}
-
-				tmp.Scale = ctOut.Scale
-
-				// [e^{d}] -> [e^{d}/q1] -> [e^{d}/q1 + e'^{d-logprec}]
-				if tmp, errScale, err = eval.bootstrap(tmp); err != nil {
-					return nil, err
-				}
-
-				tmp.Scale = tmp.Scale.Mul(*errScale)
-
-				// [[e^{d}/q1 + e'^{d-logprec}] * q1/logprec -> [e^{d-logprec} + e'^{d-2logprec}*q1]
-				if eval.IterationsParameters.ReservedPrimeBitSize == 0 {
-					if err = eval.Evaluator.Mul(tmp, scale, tmp); err != nil {
-						return nil, err
-					}
-				} else {
-
-					// Else we compute the floating point ratio
-					scale := new(big.Float).SetInt(diffScale.BigInt())
-					scale.Quo(scale, new(big.Float).SetInt(prec))
-
-					if new(big.Float).Mul(scale, new(big.Float).SetUint64(QiReserved)).Cmp(new(big.Float).SetUint64(1)) == -1 {
-						return ctOut, fmt.Errorf("warning: early stopping at iteration k=%d: reason: maximum precision achieved", i+1)
-					}
-
-					// Do a scaled multiplication by the last prime
-					if err = eval.Evaluator.Mul(tmp, scale, tmp); err != nil {
-						return nil, err
-					}
-
-					// And rescale
-					if err = eval.Evaluator.Rescale(tmp, tmp); err != nil {
-						return nil, err
-					}
-				}
-
-				// This is a given
-				tmp.Scale = ctOut.Scale
-
-				// [M^{d} + e^{d-logprec}] - [e^{d-logprec} + e'^{d-2logprec}*q1] -> [M^{d} + e'^{d-2logprec}*q1]
-				if err = eval.Evaluator.Sub(ctOut, tmp, ctOut); err != nil {
+				// And rescale
+				if err = eval.Evaluator.Rescale(tmp, tmp); err != nil {
 					return nil, err
 				}
 			}
-		}
 
-		for ctOut.Level() > eval.ResidualParameters.MaxLevel() {
-			eval.Evaluator.DropLevel(ctOut, 1)
+			// This is a given
+			tmp.Scale = ctOut.Scale
+
+			// [M^{d} + e^{d-logprec}] - [e^{d-logprec} + e'^{d-2logprec}*q1] -> [M^{d} + e'^{d-2logprec}*q1]
+			if err = eval.Evaluator.Sub(ctOut, tmp, ctOut); err != nil {
+				return nil, err
+			}
 		}
+	}
+
+	for ctOut.Level() > eval.ResidualParameters.MaxLevel() {
+		eval.Evaluator.DropLevel(ctOut, 1)
 	}
 
 	return
@@ -177,7 +175,7 @@ func (eval Evaluator) Evaluate(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, e
 // EvaluateConjugateInvariant takes two ciphertext in the Conjugate Invariant ring, repacks them in a single ciphertext in the standard ring
 // using the real and imaginary part, bootstrap both ciphertext, and then extract back the real and imaginary part before repacking them
 // individually in two new ciphertexts in the Conjugate Invariant ring.
-func (eval Evaluator) EvaluateConjugateInvariant(ctLeftN1Q0, ctRightN1Q0 *rlwe.Ciphertext) (ctLeftN1QL, ctRightN1QL *rlwe.Ciphertext, err error) {
+func (eval *Evaluator) EvaluateConjugateInvariant(ctLeftN1Q0, ctRightN1Q0 *rlwe.Ciphertext) (ctLeftN1QL, ctRightN1QL *rlwe.Ciphertext, err error) {
 
 	if ctLeftN1Q0 == nil {
 		return nil, nil, fmt.Errorf("ctLeftN1Q0 cannot be nil")
@@ -225,49 +223,140 @@ func (eval Evaluator) EvaluateConjugateInvariant(ctLeftN1Q0, ctRightN1Q0 *rlwe.C
 }
 
 // checks if the current message ratio is greater or equal to the last prime times the target message ratio.
-func checkMessageRatio(ct *rlwe.Ciphertext, msgRatio float64, r *ring.Ring) bool {
+func checkMessageRatio(ct *rlwe.Ciphertext, msgRatio float64, r ring.RNSRing) bool {
 	level := ct.Level()
-	currentMessageRatio := rlwe.NewScale(r.ModulusAtLevel[level])
+	currentMessageRatio := rlwe.NewScale(r.AtLevel(level).Modulus())
 	currentMessageRatio = currentMessageRatio.Div(ct.Scale)
-	return currentMessageRatio.Cmp(rlwe.NewScale(r.SubRings[level].Modulus).Mul(rlwe.NewScale(msgRatio))) > -1
+	return currentMessageRatio.Cmp(rlwe.NewScale(r[level].Modulus).Mul(rlwe.NewScale(msgRatio))) > -1
 }
 
-func (eval Evaluator) bootstrap(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, errScale *rlwe.Scale, err error) {
+func (eval *Evaluator) bootstrap(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, errScale *rlwe.Scale, err error) {
 
 	// Step 1: scale to q/|m|
-	if ctOut, errScale, err = eval.ScaleDown(ctIn); err != nil {
+	var in *rlwe.Ciphertext
+	if in, errScale, err = eval.ScaleDown(ctIn); err != nil {
 		return
 	}
 
 	// Step 2 : Extend the basis from q to Q
-	if ctOut, err = eval.ModUp(ctOut); err != nil {
+	if in, err = eval.ModUp(in); err != nil {
 		return
 	}
 
 	// Step 3 : CoeffsToSlots (Homomorphic encoding)
-	// ctReal = Ecd(real)
-	// ctImag = Ecd(imag)
-	// If n < N/2 then ctReal = Ecd(real||imag)
-	var ctReal, ctImag *rlwe.Ciphertext
-	if ctReal, ctImag, err = eval.CoeffsToSlots(ctOut); err != nil {
+	// real0 = Ecd(real) / K
+	// imag0 = Ecd(imag) / K
+	// If n < N/2 then real0 = Ecd(real||imag)
+	var real0, imag0 *rlwe.Ciphertext
+	if real0, imag0, err = eval.CoeffsToSlots(in); err != nil {
 		return
 	}
 
-	// Step 4 : EvalMod (Homomorphic modular reduction)
-	if ctReal, err = eval.EvalMod(ctReal); err != nil {
-		return
-	}
+	if eval.EvalRound {
 
-	// Step 4 : EvalMod (Homomorphic modular reduction)
-	if ctImag != nil {
-		if ctImag, err = eval.EvalMod(ctImag); err != nil {
+		// real0 = Ecd(real + i*Q) / (K * QDiff)
+		// imag0 = Ecd(imag + i*Q) / (K * QDiff)
+
+		K := eval.Mod1Parameters.Mod1Interval()
+
+		// real1 = Ecd(real)
+		var real1 *rlwe.Ciphertext
+		if real1, err = eval.Mod1Evaluator.EvaluateNew(real0); err != nil {
+			return nil, nil, fmt.Errorf("eval.Mod1Evaluator.EvaluateWithAffineTransformationNew: %w", err)
+		}
+
+		// real0 = Ecd(real + i*Q)
+		if err = eval.Mul(real0, K*eval.Mod1Parameters.QDiff, real0); err != nil {
+			return nil, nil, fmt.Errorf("eval.Mul: %w", err)
+		}
+
+		if err = eval.Rescale(real0, real0); err != nil {
+			return nil, nil, fmt.Errorf("eval.Rescale: %w", err)
+		}
+
+		// real1 = Ecd(real) - Ecd(real + i*Q) = -i*Q
+		if err = eval.Sub(real1, real0, real1); err != nil {
+			return nil, nil, fmt.Errorf("eval.Sub: %w", err)
+		}
+
+		if imag0 != nil {
+
+			var imag1 *rlwe.Ciphertext
+			if imag1, err = eval.Mod1Evaluator.EvaluateNew(imag0); err != nil {
+				return nil, nil, fmt.Errorf("eval.Mod1Evaluator.EvaluateWithAffineTransformationNew: %w", err)
+			}
+
+			// imag0 = Ecd(imag + i*Q)
+			if err = eval.Mul(imag0, K*eval.Mod1Parameters.QDiff, imag0); err != nil {
+				return nil, nil, fmt.Errorf("eval.Mul: %w", err)
+			}
+
+			if err = eval.Rescale(imag0, imag0); err != nil {
+				return nil, nil, fmt.Errorf("eval.Rescale: %w", err)
+			}
+
+			// imag1 = Ecd(imag) - Ecd(imag + i*Q) = -i*Q
+			if err = eval.Sub(imag1, imag0, imag1); err != nil {
+				return nil, nil, fmt.Errorf("eval.Sub: %w", err)
+			}
+
+			// Recombines the real and imaginary part
+			if err = eval.Evaluator.Mul(imag1, 1i, imag1); err != nil {
+				return nil, nil, fmt.Errorf("eval.Mul: %w", err)
+			}
+
+			// ctOut = - real(i*Q) - imag(i*Q)
+			if ctOut, err = eval.Evaluator.AddNew(real1, imag1); err != nil {
+				return nil, nil, fmt.Errorf("eval.AddNew: %w", err)
+			}
+		} else {
+			ctOut = real1
+		}
+
+		// Recombines the real and imaginary part
+		var in0 *rlwe.Ciphertext
+		if real0, imag0, err = eval.CoeffsToSlotsBypass(in); err != nil {
+			return nil, nil, fmt.Errorf("eval.CoeffsToSlotsBypass: %w", err)
+		}
+
+		if imag0 != nil {
+			if in0, err = eval.Evaluator.MulNew(imag0, 1i); err != nil {
+				return nil, nil, fmt.Errorf("eval.MulNew: %w", err)
+			}
+
+			if err = eval.Evaluator.Add(in0, real0, in0); err != nil {
+				return nil, nil, fmt.Errorf("eval.Add: %w", err)
+			}
+		} else {
+			in0 = real0
+		}
+
+		if err = eval.Add(in0, ctOut, in0); err != nil {
+			return nil, nil, fmt.Errorf("eval.Add: %w", err)
+		}
+
+		if ctOut, err = eval.SlotsToCoeffs(in0, nil); err != nil {
+			return nil, nil, fmt.Errorf("eval.SlotsToCoeffs: %w", err)
+		}
+
+	} else {
+
+		// Step 4 : EvalMod (Homomorphic modular reduction)
+		if real0, err = eval.EvalMod(real0); err != nil {
 			return
 		}
-	}
 
-	// Step 5 : SlotsToCoeffs (Homomorphic decoding)
-	if ctOut, err = eval.SlotsToCoeffs(ctReal, ctImag); err != nil {
-		return
+		// Step 4 : EvalMod (Homomorphic modular reduction)
+		if imag0 != nil {
+			if imag0, err = eval.EvalMod(imag0); err != nil {
+				return
+			}
+		}
+
+		// Step 5 : SlotsToCoeffs (Homomorphic decoding)
+		if ctOut, err = eval.SlotsToCoeffs(real0, imag0); err != nil {
+			return
+		}
 	}
 
 	return
@@ -279,19 +368,21 @@ func (eval Evaluator) bootstrap(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, 
 // - targetMessageRatio = q/|m|
 // and updates the scale of ctIn accordingly
 // It then rescales the ciphertext down to q if necessary and also returns the rescaling error from this process
-func (eval Evaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *rlwe.Scale, error) {
+func (eval *Evaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *rlwe.Scale, error) {
 
 	params := &eval.BootstrappingParameters
 
-	r := params.RingQ()
+	r := params.RingQ().AtLevel(ctIn.Level())
 
 	// Removes unecessary primes
 	for ctIn.Level() != 0 && checkMessageRatio(ctIn, eval.Mod1Parameters.MessageRatio(), r) {
-		ctIn.Resize(ctIn.Degree(), ctIn.Level()-1)
+		ctIn.ResizeQ(ctIn.Level() - 1)
 	}
 
+	r = r.AtLevel(ctIn.Level())
+
 	// Current Message Ratio
-	currentMessageRatio := rlwe.NewScale(r.ModulusAtLevel[ctIn.Level()])
+	currentMessageRatio := rlwe.NewScale(r.Modulus())
 	currentMessageRatio = currentMessageRatio.Div(ctIn.Scale)
 
 	// Desired Message Ratio
@@ -313,7 +404,7 @@ func (eval Evaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *rlwe.
 	ctIn.Scale = ctIn.Scale.Mul(rlwe.NewScale(scaleUpBigint))
 
 	// errScale = CtIn.Scale/(Q[0]/MessageRatio)
-	targetScale := new(big.Float).SetPrec(256).SetInt(r.ModulusAtLevel[0])
+	targetScale := new(big.Float).SetPrec(256).SetInt(r.AtLevel(0).Modulus())
 	targetScale.Quo(targetScale, new(big.Float).SetFloat64(eval.Mod1Parameters.MessageRatio()))
 
 	if ctIn.Level() != 0 {
@@ -329,7 +420,7 @@ func (eval Evaluator) ScaleDown(ctIn *rlwe.Ciphertext) (*rlwe.Ciphertext, *rlwe.
 }
 
 // ModUp raise the modulus from q to Q, scales the message  and applies the Trace if the ciphertext is sparsely packed.
-func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
+func (eval *Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
 
 	// Switch to the sparse key
 	if eval.EvkDenseToSparse != nil {
@@ -343,17 +434,17 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 	ringQ := params.RingQ().AtLevel(ctIn.Level())
 	ringP := params.RingP()
 
-	for i := range ctIn.Value {
-		ringQ.INTT(ctIn.Value[i], ctIn.Value[i])
+	for i := range ctIn.Q {
+		ringQ.INTT(ctIn.Q[i], ctIn.Q[i])
 	}
 
-	// Extend the ciphertext from q to Q with zero values.
-	ctIn.Resize(ctIn.Degree(), params.MaxLevel())
-
-	levelQ := params.QCount() - 1
+	levelQ := params.MaxLevel()
 	levelP := params.PCount() - 1
 
-	ringQ = ringQ.AtLevel(levelQ)
+	// Extend the ciphertext from q to Q with zero values.
+	ctIn.ResizeQ(levelQ)
+
+	ringQ = params.RingQ().AtLevel(levelQ)
 
 	Q := ringQ.ModuliChain()
 	P := ringP.ModuliChain()
@@ -368,7 +459,7 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 	// ModUp q->Q for ctIn[0] centered around q
 	for j := 0; j < N; j++ {
 
-		coeff = ctIn.Value[0].Coeffs[0][j]
+		coeff = ctIn.Q[0].At(0)[j]
 		pos, neg = 1, 0
 		if coeff >= (q >> 1) {
 			coeff = q - coeff
@@ -377,18 +468,20 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 
 		for i := 1; i < levelQ+1; i++ {
 			tmp = ring.BRedAdd(coeff, Q[i], BRCQ[i])
-			ctIn.Value[0].Coeffs[i][j] = tmp*pos + (Q[i]-tmp)*neg
+			ctIn.Q[0].At(i)[j] = tmp*pos + (Q[i]-tmp)*neg
 		}
 	}
 
 	if eval.EvkSparseToDense != nil {
+
+		buf := eval.HoistingBuffer
 
 		ks := eval.Evaluator.Evaluator
 
 		// ModUp q->QP for ctIn[1] centered around q
 		for j := 0; j < N; j++ {
 
-			coeff = ctIn.Value[1].Coeffs[0][j]
+			coeff = ctIn.Q[1].At(0)[j]
 			pos, neg = 1, 0
 			if coeff > (q >> 1) {
 				coeff = q - coeff
@@ -397,39 +490,40 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 
 			for i := 0; i < levelQ+1; i++ {
 				tmp = ring.BRedAdd(coeff, Q[i], BRCQ[i])
-				ks.BuffDecompQP[0].Q.Coeffs[i][j] = tmp*pos + (Q[i]-tmp)*neg
+				buf[0].Q.At(i)[j] = tmp*pos + (Q[i]-tmp)*neg
 
 			}
 
 			for i := 0; i < levelP+1; i++ {
 				tmp = ring.BRedAdd(coeff, P[i], BRCP[i])
-				ks.BuffDecompQP[0].P.Coeffs[i][j] = tmp*pos + (P[i]-tmp)*neg
+				buf[0].P.At(i)[j] = tmp*pos + (P[i]-tmp)*neg
 			}
 		}
 
-		for i := len(ks.BuffDecompQP) - 1; i >= 0; i-- {
-			ringQ.NTT(ks.BuffDecompQP[0].Q, ks.BuffDecompQP[i].Q)
+		for i := len(buf) - 1; i >= 0; i-- {
+			ringQ.NTT(buf[0].Q, buf[i].Q)
 		}
 
-		for i := len(ks.BuffDecompQP) - 1; i >= 0; i-- {
-			ringP.NTT(ks.BuffDecompQP[0].P, ks.BuffDecompQP[i].P)
+		for i := len(buf) - 1; i >= 0; i-- {
+			ringP.NTT(buf[0].P, buf[i].P)
 		}
 
-		ringQ.NTT(ctIn.Value[0], ctIn.Value[0])
+		ringQ.NTT(ctIn.Q[0], ctIn.Q[0])
 
 		ctTmp := &rlwe.Ciphertext{}
-		ctTmp.Value = []ring.Poly{ks.BuffQP[1].Q, ctIn.Value[1]}
+		ctTmp.Vector = &ring.Vector{}
+		ctTmp.Q = []ring.RNSPoly{ks.BuffQ[1], ctIn.Q[1]}
 		ctTmp.MetaData = ctIn.MetaData
 
 		// Switch back to the dense key
-		ks.GadgetProductHoisted(levelQ, ks.BuffDecompQP, &eval.EvkSparseToDense.GadgetCiphertext, ctTmp)
-		ringQ.Add(ctIn.Value[0], ctTmp.Value[0], ctIn.Value[0])
+		ks.GadgetProductHoisted(levelQ, buf, &eval.EvkSparseToDense.GadgetCiphertext, ctTmp)
+		ringQ.Add(ctIn.Q[0], ctTmp.Q[0], ctIn.Q[0])
 
 	} else {
 
 		for j := 0; j < N; j++ {
 
-			coeff = ctIn.Value[1].Coeffs[0][j]
+			coeff = ctIn.Q[1].At(0)[j]
 			pos, neg = 1, 0
 			if coeff >= (q >> 1) {
 				coeff = q - coeff
@@ -438,12 +532,12 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 
 			for i := 1; i < levelQ+1; i++ {
 				tmp = ring.BRedAdd(coeff, Q[i], BRCQ[i])
-				ctIn.Value[1].Coeffs[i][j] = tmp*pos + (Q[i]-tmp)*neg
+				ctIn.Q[1].At(i)[j] = tmp*pos + (Q[i]-tmp)*neg
 			}
 		}
 
-		ringQ.NTT(ctIn.Value[0], ctIn.Value[0])
-		ringQ.NTT(ctIn.Value[1], ctIn.Value[1])
+		ringQ.NTT(ctIn.Q[0], ctIn.Q[0])
+		ringQ.NTT(ctIn.Q[1], ctIn.Q[1])
 	}
 
 	// Scale the message from Q0/|m| to QL/|m|, where QL is the largest modulus used during the bootstrapping.
@@ -459,24 +553,35 @@ func (eval Evaluator) ModUp(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err 
 
 // CoeffsToSlots applies the homomorphic decoding
 func (eval Evaluator) CoeffsToSlots(ctIn *rlwe.Ciphertext) (ctReal, ctImag *rlwe.Ciphertext, err error) {
-	return eval.CoeffsToSlotsNew(ctIn, eval.C2SDFTMatrix)
+	return eval.CoeffsToSlotsNew(ctIn, eval.C2SDFTMatrix, eval.HoistingBuffer)
+}
+
+// CoeffsToSlotsBypass applies the high precision homomorphic decoding bypass of the EvalRound approach.
+// See https://eprint.iacr.org/2024/1379.
+func (eval *Evaluator) CoeffsToSlotsBypass(ctIn *rlwe.Ciphertext) (real0, imag0 *rlwe.Ciphertext, err error) {
+	if eval.C2SDFTMatrixBypass != nil {
+		return eval.CoeffsToSlotsNew(ctIn, eval.C2SDFTMatrixBypass, eval.HoistingBuffer)
+	}
+
+	return nil, nil, fmt.Errorf("eval.C2SDFTMatrixBypass is nil")
 }
 
 // EvalMod applies the homomorphic modular reduction by q.
-func (eval Evaluator) EvalMod(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
+func (eval *Evaluator) EvalMod(ctIn *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
 
 	if ctOut, err = eval.Mod1Evaluator.EvaluateNew(ctIn); err != nil {
 		return nil, err
 	}
 	ctOut.Scale = eval.BootstrappingParameters.DefaultScale()
+
 	return
 }
 
 func (eval Evaluator) SlotsToCoeffs(ctReal, ctImag *rlwe.Ciphertext) (ctOut *rlwe.Ciphertext, err error) {
-	return eval.SlotsToCoeffsNew(ctReal, ctImag, eval.S2CDFTMatrix)
+	return eval.SlotsToCoeffsNew(ctReal, ctImag, eval.S2CDFTMatrix, eval.HoistingBuffer)
 }
 
-func (eval Evaluator) SwitchRingDegreeN1ToN2New(ctN1 *rlwe.Ciphertext) (ctN2 *rlwe.Ciphertext) {
+func (eval *Evaluator) SwitchRingDegreeN1ToN2New(ctN1 *rlwe.Ciphertext) (ctN2 *rlwe.Ciphertext) {
 	ctN2 = hefloat.NewCiphertext(eval.BootstrappingParameters, 1, ctN1.Level())
 
 	// Sanity check, this error should never happen unless this algorithm has been improperly
@@ -487,7 +592,7 @@ func (eval Evaluator) SwitchRingDegreeN1ToN2New(ctN1 *rlwe.Ciphertext) (ctN2 *rl
 	return
 }
 
-func (eval Evaluator) SwitchRingDegreeN2ToN1New(ctN2 *rlwe.Ciphertext) (ctN1 *rlwe.Ciphertext) {
+func (eval *Evaluator) SwitchRingDegreeN2ToN1New(ctN2 *rlwe.Ciphertext) (ctN1 *rlwe.Ciphertext) {
 	ctN1 = hefloat.NewCiphertext(eval.ResidualParameters, 1, ctN2.Level())
 
 	// Sanity check, this error should never happen unless this algorithm has been improperly
@@ -498,29 +603,29 @@ func (eval Evaluator) SwitchRingDegreeN2ToN1New(ctN2 *rlwe.Ciphertext) (ctN1 *rl
 	return
 }
 
-func (eval Evaluator) ComplexToRealNew(ctCmplx *rlwe.Ciphertext) (ctReal *rlwe.Ciphertext) {
-	ctReal = hefloat.NewCiphertext(eval.ResidualParameters, 1, ctCmplx.Level())
+func (eval *Evaluator) ComplexToRealNew(ctCmplx *rlwe.Ciphertext) (real0 *rlwe.Ciphertext) {
+	real0 = hefloat.NewCiphertext(eval.ResidualParameters, 1, ctCmplx.Level())
 
 	// Sanity check, this error should never happen unless this algorithm has been improperly
 	// modified to pass invalid inputs.
-	if err := eval.DomainSwitcher.ComplexToReal(&eval.Evaluator.Evaluator, ctCmplx, ctReal); err != nil {
+	if err := eval.DomainSwitcher.ComplexToReal(eval.Evaluator, ctCmplx, real0); err != nil {
 		panic(err)
 	}
 	return
 }
 
-func (eval Evaluator) RealToComplexNew(ctReal *rlwe.Ciphertext) (ctCmplx *rlwe.Ciphertext) {
-	ctCmplx = hefloat.NewCiphertext(eval.BootstrappingParameters, 1, ctReal.Level())
+func (eval *Evaluator) RealToComplexNew(real0 *rlwe.Ciphertext) (ctCmplx *rlwe.Ciphertext) {
+	ctCmplx = hefloat.NewCiphertext(eval.BootstrappingParameters, 1, real0.Level())
 
 	// Sanity check, this error should never happen unless this algorithm has been improperly
 	// modified to pass invalid inputs.
-	if err := eval.DomainSwitcher.RealToComplex(&eval.Evaluator.Evaluator, ctReal, ctCmplx); err != nil {
+	if err := eval.DomainSwitcher.RealToComplex(eval.Evaluator, real0, ctCmplx); err != nil {
 		panic(err)
 	}
 	return
 }
 
-func (eval Evaluator) PackAndSwitchN1ToN2(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, error) {
+func (eval *Evaluator) PackAndSwitchN1ToN2(cts []rlwe.Ciphertext) ([]rlwe.Ciphertext, error) {
 
 	var err error
 
@@ -541,11 +646,12 @@ func (eval Evaluator) PackAndSwitchN1ToN2(cts []rlwe.Ciphertext) ([]rlwe.Ciphert
 	return cts, nil
 }
 
-func (eval Evaluator) UnpackAndSwitchN2Tn1(cts []rlwe.Ciphertext, LogSlots, Nb int) ([]rlwe.Ciphertext, error) {
+func (eval *Evaluator) UnpackAndSwitchN2Tn1(cts []rlwe.Ciphertext, LogSlots, Nb int) ([]rlwe.Ciphertext, error) {
 
 	var err error
 
 	if eval.ResidualParameters.N() != eval.BootstrappingParameters.N() {
+
 		if cts, err = eval.UnPack(cts, eval.BootstrappingParameters, LogSlots, Nb, eval.xPow2InvN2); err != nil {
 			return nil, fmt.Errorf("cannot UnpackAndSwitchN2Tn1: UnpackN2: %w", err)
 		}
@@ -555,14 +661,11 @@ func (eval Evaluator) UnpackAndSwitchN2Tn1(cts []rlwe.Ciphertext, LogSlots, Nb i
 		}
 	}
 
-	for i := range cts {
-		cts[i].LogDimensions.Cols = LogSlots
-	}
-
 	return cts, nil
 }
 
-func (eval Evaluator) UnPack(cts []rlwe.Ciphertext, params hefloat.Parameters, LogSlots, Nb int, xPow2Inv []ring.Poly) ([]rlwe.Ciphertext, error) {
+func (eval Evaluator) UnPack(cts []rlwe.Ciphertext, params hefloat.Parameters, LogSlots, Nb int, xPow2Inv []ring.RNSPoly) ([]rlwe.Ciphertext, error) {
+
 	LogGap := params.LogMaxSlots() - LogSlots
 
 	if LogGap == 0 {
@@ -570,16 +673,18 @@ func (eval Evaluator) UnPack(cts []rlwe.Ciphertext, params hefloat.Parameters, L
 	}
 
 	cts = append(cts, make([]rlwe.Ciphertext, Nb-1)...)
+	cts[0].LogDimensions.Cols = LogSlots
 
 	for i := 1; i < len(cts); i++ {
-		cts[i] = *cts[0].CopyNew()
+		cts[i] = *cts[0].Clone()
+		cts[i].LogDimensions.Cols = LogSlots
 	}
 
 	r := params.RingQ().AtLevel(cts[0].Level())
 
 	N := len(cts)
 
-	for i := 0; i < utils.Min(bits.Len64(uint64(N-1)), LogGap); i++ {
+	for i := 0; i < min(bits.Len64(uint64(N-1)), LogGap); i++ {
 
 		step := 1 << (i + 1)
 
@@ -591,8 +696,8 @@ func (eval Evaluator) UnPack(cts []rlwe.Ciphertext, params hefloat.Parameters, L
 					break
 				}
 
-				r.MulCoeffsMontgomery(cts[j+k].Value[0], xPow2Inv[i], cts[j+k].Value[0])
-				r.MulCoeffsMontgomery(cts[j+k].Value[1], xPow2Inv[i], cts[j+k].Value[1])
+				r.MulCoeffsMontgomery(cts[j+k].Q[0], xPow2Inv[i], cts[j+k].Q[0])
+				r.MulCoeffsMontgomery(cts[j+k].Q[1], xPow2Inv[i], cts[j+k].Q[1])
 			}
 		}
 	}
@@ -600,7 +705,7 @@ func (eval Evaluator) UnPack(cts []rlwe.Ciphertext, params hefloat.Parameters, L
 	return cts, nil
 }
 
-func (eval Evaluator) Pack(cts []rlwe.Ciphertext, params hefloat.Parameters, xPow2 []ring.Poly) ([]rlwe.Ciphertext, error) {
+func (eval Evaluator) Pack(cts []rlwe.Ciphertext, params hefloat.Parameters, xPow2 []ring.RNSPoly) ([]rlwe.Ciphertext, error) {
 
 	var LogSlots = cts[0].LogSlots()
 	RingDegree := params.N()
@@ -610,8 +715,8 @@ func (eval Evaluator) Pack(cts []rlwe.Ciphertext, params hefloat.Parameters, xPo
 			return nil, fmt.Errorf("cannot Pack: cts[%d].PlaintextLogSlots()=%d != cts[0].PlaintextLogSlots=%d", i, N, LogSlots)
 		}
 
-		if N := ct.Value[0].N(); N != RingDegree {
-			return nil, fmt.Errorf("cannot Pack: cts[%d].Value[0].N()=%d != params.N()=%d", i, N, RingDegree)
+		if N := ct.N(); N != RingDegree {
+			return nil, fmt.Errorf("cannot Pack: cts[%d].N()=%d != params.N()=%d", i, N, RingDegree)
 		}
 	}
 
@@ -628,14 +733,15 @@ func (eval Evaluator) Pack(cts []rlwe.Ciphertext, params hefloat.Parameters, xPo
 			eve := cts[j*2+0]
 			odd := cts[j*2+1]
 
-			level := utils.Min(eve.Level(), odd.Level())
+			level := min(eve.Level(), odd.Level())
 
 			r := params.RingQ().AtLevel(level)
 
-			r.MulCoeffsMontgomeryThenAdd(odd.Value[0], xPow2[i], eve.Value[0])
-			r.MulCoeffsMontgomeryThenAdd(odd.Value[1], xPow2[i], eve.Value[1])
+			r.MulCoeffsMontgomeryThenAdd(odd.Q[0], xPow2[i], eve.Q[0])
+			r.MulCoeffsMontgomeryThenAdd(odd.Q[1], xPow2[i], eve.Q[1])
 
 			cts[j] = eve
+			cts[j].LogDimensions.Cols++
 		}
 
 		if len(cts)&1 == 1 {
@@ -644,11 +750,6 @@ func (eval Evaluator) Pack(cts []rlwe.Ciphertext, params hefloat.Parameters, xPo
 		} else {
 			cts = cts[:len(cts)>>1]
 		}
-	}
-
-	LogMaxDimensions := params.LogMaxDimensions()
-	for i := range cts {
-		cts[i].LogDimensions = LogMaxDimensions
 	}
 
 	return cts, nil

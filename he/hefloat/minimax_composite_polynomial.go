@@ -5,8 +5,7 @@ import (
 	"math"
 	"math/big"
 
-	"github.com/tuneinsight/lattigo/v5/utils"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
+	"github.com/Pro7ech/lattigo/utils/bignum"
 )
 
 // MinimaxCompositePolynomial is a struct storing P(x) = pk(x) o pk-1(x) o ... o p1(x) o p0(x).
@@ -30,7 +29,7 @@ func NewMinimaxCompositePolynomial(coeffsStr [][]string) MinimaxCompositePolynom
 			},
 		)
 
-		polys[i] = poly
+		polys[i] = *poly
 	}
 
 	return MinimaxCompositePolynomial(polys)
@@ -38,7 +37,7 @@ func NewMinimaxCompositePolynomial(coeffsStr [][]string) MinimaxCompositePolynom
 
 func (mcp MinimaxCompositePolynomial) MaxDepth() (depth int) {
 	for i := range mcp {
-		depth = utils.Max(depth, mcp[i].Depth())
+		depth = max(depth, mcp[i].Depth())
 	}
 	return
 }
@@ -122,7 +121,7 @@ func GenMinimaxCompositePolynomialForSign(prec uint, logalpha, logerr int, deg [
 // The function will print information about each step of the computation in real time so that it can be monitored.
 //
 // The underlying algorithm use the multi-interval Remez algorithm of https://eprint.iacr.org/2020/834.pdf.
-func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f func(*big.Float) *big.Float) (coeffs [][]*big.Float) {
+func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f func(*big.Float) *big.Float) (coeffs [][]big.Float) {
 	decimals := int(float64(logalpha)/math.Log2(10)+0.5) + 10
 
 	// Precision of the output value of the sign polynomial
@@ -133,9 +132,6 @@ func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f
 
 	// Maximum number of iterations
 	maxIters := 50
-
-	// Scan step for finding zeroes of the error function
-	scanStep := bignum.NewFloat(1e-3, prec)
 
 	// Interval [-1, alpha] U [alpha, 1]
 	intervals := []bignum.Interval{
@@ -150,12 +146,10 @@ func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f
 
 	// Parameters of the minimax approximation
 	params := bignum.RemezParameters{
-		Function:        f,
-		Basis:           bignum.Chebyshev,
-		Intervals:       intervals,
-		ScanStep:        scanStep,
-		Prec:            prec,
-		OptimalScanStep: true,
+		Function:  f,
+		Basis:     bignum.Chebyshev,
+		Intervals: intervals,
+		Prec:      prec,
 	}
 
 	fmt.Printf("P[0]\n")
@@ -166,7 +160,7 @@ func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f
 	r.ShowError(decimals)
 	fmt.Println()
 
-	coeffs = make([][]*big.Float, len(deg))
+	coeffs = make([][]big.Float, len(deg))
 
 	for i := 1; i < len(deg); i++ {
 
@@ -187,19 +181,17 @@ func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f
 			{A: *minInterval, B: *maxInterval, Nodes: 1 + ((deg[i] + 1) >> 1)},
 		}
 
-		coeffs[i-1] = make([]*big.Float, deg[i-1]+1)
+		coeffs[i-1] = make([]big.Float, deg[i-1]+1)
 		for j := range coeffs[i-1] {
-			coeffs[i-1][j] = new(big.Float).Set(r.Coeffs[j])
-			coeffs[i-1][j].Quo(coeffs[i-1][j], maxInterval) // Interval normalization
+			coeffs[i-1][j].Set(&r.Coeffs[j])
+			coeffs[i-1][j].Quo(&coeffs[i-1][j], maxInterval) // Interval normalization
 		}
 
 		params := bignum.RemezParameters{
-			Function:        f,
-			Basis:           bignum.Chebyshev,
-			Intervals:       intervals,
-			ScanStep:        scanStep,
-			Prec:            prec,
-			OptimalScanStep: true,
+			Function:  f,
+			Basis:     bignum.Chebyshev,
+			Intervals: intervals,
+			Prec:      prec,
 		}
 
 		fmt.Printf("P[%d]\n", i)
@@ -212,9 +204,9 @@ func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f
 	}
 
 	// Since this is the last polynomial, we can skip the interval scaling.
-	coeffs[len(deg)-1] = make([]*big.Float, deg[len(deg)-1]+1)
+	coeffs[len(deg)-1] = make([]big.Float, deg[len(deg)-1]+1)
 	for j := range coeffs[len(deg)-1] {
-		coeffs[len(deg)-1][j] = new(big.Float).Set(r.Coeffs[j])
+		coeffs[len(deg)-1][j].Set(&r.Coeffs[j])
 	}
 
 	f64, _ := r.MaxErr.Float64()
@@ -227,11 +219,11 @@ func GenMinimaxCompositePolynomial(prec uint, logalpha, logerr int, deg []int, f
 // PrettyPrintCoefficients prints the coefficients formatted.
 // If odd = true, even coefficients are zeroed.
 // If even = true, odd coefficients are zeroed.
-func PrettyPrintCoefficients(decimals int, coeffs []*big.Float, odd, even, first bool) {
+func PrettyPrintCoefficients(decimals int, coeffs []big.Float, odd, even, first bool) {
 	fmt.Printf("{")
 	for i, c := range coeffs {
 		if (i&1 == 1 && odd) || (i&1 == 0 && even) || (i == 0 && first) {
-			fmt.Printf("\"%.*f\", ", decimals, c)
+			fmt.Printf("\"%.*f\", ", decimals, &c)
 		} else {
 			fmt.Printf("\"0\", ")
 		}
@@ -240,18 +232,18 @@ func PrettyPrintCoefficients(decimals int, coeffs []*big.Float, odd, even, first
 	fmt.Printf("},\n")
 }
 
-func parseCoeffs(coeffsStr []string) (coeffs []*big.Float) {
+func parseCoeffs(coeffsStr []string) (coeffs []big.Float) {
 
 	var prec uint
 	for _, c := range coeffsStr {
-		prec = utils.Max(prec, uint(len(c)))
+		prec = max(prec, uint(len(c)))
 	}
 
 	prec = uint(float64(prec)*3.3219280948873626 + 0.5) // max(float64, digits * log2(10))
 
-	coeffs = make([]*big.Float, len(coeffsStr))
+	coeffs = make([]big.Float, len(coeffsStr))
 	for i := range coeffsStr {
-		coeffs[i], _ = new(big.Float).SetPrec(prec).SetString(coeffsStr[i])
+		coeffs[i].SetPrec(prec).SetString(coeffsStr[i])
 	}
 
 	return

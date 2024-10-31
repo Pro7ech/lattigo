@@ -1,7 +1,7 @@
 package mhefloat
 
 import (
-	"github.com/tuneinsight/lattigo/v5/he/hefloat"
+	"github.com/Pro7ech/lattigo/he/hefloat"
 )
 
 var (

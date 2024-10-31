@@ -1,15 +1,13 @@
-// Package he implements scheme agnostic functionalities for RLWE-based Homomorphic Encryption schemes implemented in Lattigo.
+// Package he implements scheme agnostic functionalities for RLWE-based Homomorphic Encryption schemes implemented in lattigo.
 package he
 
 import (
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/ring/ringqp"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 // Encoder defines a set of common and scheme agnostic method provided by an Encoder struct.
-type Encoder[T any, U *ring.Poly | ringqp.Poly | *rlwe.Plaintext] interface {
-	Encode(values []T, metaData *rlwe.MetaData, output U) (err error)
+type Encoder interface {
+	Embed(values interface{}, metaData *rlwe.MetaData, output interface{}) (err error)
 }
 
 // Evaluator defines a set of common and scheme agnostic method provided by an Evaluator struct.
@@ -27,4 +25,6 @@ type Evaluator interface {
 	Relinearize(op0, op1 *rlwe.Ciphertext) (err error)
 	Rescale(op0, op1 *rlwe.Ciphertext) (err error)
 	GetEvaluatorBuffer() *rlwe.EvaluatorBuffers // TODO extract
+	DropLevel(op0 *rlwe.Ciphertext, Level int)
+	LevelsConsumedPerRescaling() int
 }

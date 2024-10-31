@@ -3,10 +3,10 @@ package he
 import (
 	"testing"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/utils/bignum"
-	"github.com/tuneinsight/lattigo/v5/utils/buffer"
-	"github.com/tuneinsight/lattigo/v5/utils/sampling"
+	"github.com/Pro7ech/lattigo/rlwe"
+	"github.com/Pro7ech/lattigo/utils/bignum"
+	"github.com/Pro7ech/lattigo/utils/buffer"
+	"github.com/Pro7ech/lattigo/utils/sampling"
 )
 
 func TestPowerBasis(t *testing.T) {
@@ -23,17 +23,23 @@ func TestPowerBasis(t *testing.T) {
 
 		levelQ := params.MaxLevelQ()
 
-		prng, _ := sampling.NewPRNG()
+		source := sampling.NewSource(sampling.NewSeed())
 
-		ct := rlwe.NewCiphertextRandom(prng, params, 1, levelQ)
+		ct := rlwe.NewCiphertext(params, 1, levelQ, -1)
+		ct.Randomize(params, source)
 
 		basis := NewPowerBasis(ct, bignum.Chebyshev)
 
-		basis.Value[2] = rlwe.NewCiphertextRandom(prng, params, 1, levelQ)
-		basis.Value[3] = rlwe.NewCiphertextRandom(prng, params, 2, levelQ)
-		basis.Value[4] = rlwe.NewCiphertextRandom(prng, params, 1, levelQ)
-		basis.Value[8] = rlwe.NewCiphertextRandom(prng, params, 1, levelQ)
+		basis.Value[2] = rlwe.NewCiphertext(params, 1, levelQ, -1)
+		basis.Value[3] = rlwe.NewCiphertext(params, 2, levelQ, -1)
+		basis.Value[4] = rlwe.NewCiphertext(params, 1, levelQ, -1)
+		basis.Value[8] = rlwe.NewCiphertext(params, 1, levelQ, -1)
 
-		buffer.RequireSerializerCorrect(t, &basis)
+		basis.Value[2].Randomize(params, source)
+		basis.Value[3].Randomize(params, source)
+		basis.Value[4].Randomize(params, source)
+		basis.Value[8].Randomize(params, source)
+
+		buffer.RequireSerializerCorrect(t, basis)
 	})
 }

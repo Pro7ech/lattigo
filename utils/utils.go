@@ -4,25 +4,7 @@ package utils
 import (
 	"math/bits"
 	"reflect"
-
-	"golang.org/x/exp/constraints"
 )
-
-// Min returns the minimum value of the two inputs.
-func Min[V constraints.Ordered](a, b V) (r V) {
-	if a <= b {
-		return a
-	}
-	return b
-}
-
-// Max returns the maximum value of the two inputs.
-func Max[V constraints.Ordered](a, b V) (r V) {
-	if a >= b {
-		return a
-	}
-	return b
-}
 
 // IsNil returns true either type or value are nil.
 // Only interfaces or pointers to objects should be passed as argument.
@@ -35,7 +17,7 @@ func BitReverse64[V uint64 | uint32 | int | int64](index V, bitLen int) uint64 {
 	return bits.Reverse64(uint64(index)) >> (64 - bitLen)
 }
 
-// HammingWeight64 returns the hammingweight if the input value.
+// HammingWeight64 returns the Hamming weight if the input value.
 func HammingWeight64[V uint64 | uint32 | int | int64](x V) V {
 	y := uint64(x)
 	y -= (y >> 1) & 0x5555555555555555

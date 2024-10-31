@@ -6,10 +6,9 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/Pro7ech/lattigo/ring"
+	"github.com/Pro7ech/lattigo/rlwe"
 	"github.com/stretchr/testify/require"
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
-	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/utils"
 )
 
 func testString(params rlwe.Parameters, opname string) string {
@@ -68,7 +67,9 @@ func testBlindRotation(t *testing.T) {
 
 	require.NoError(t, err)
 
-	evkParams := rlwe.EvaluationKeyParameters{BaseTwoDecomposition: utils.Pointy(7)}
+	evkParams := rlwe.EvaluationKeyParameters{}
+	evkParams.DigitDecomposition.Type = rlwe.Unsigned
+	evkParams.Log2Basis = 7
 
 	require.NoError(t, err)
 
@@ -87,7 +88,7 @@ func testBlindRotation(t *testing.T) {
 		testPoly := InitTestPolynomial(sign, rlwe.NewScale(scaleBR), paramsBR.RingQ(), -1, 1)
 
 		// Index map of which test poly to evaluate on which slot
-		testPolyMap := make(map[int]*ring.Poly)
+		testPolyMap := make(map[int]*ring.RNSPoly)
 		for i := 0; i < slots; i++ {
 			testPolyMap[i] = &testPoly
 		}
@@ -105,22 +106,22 @@ func testBlindRotation(t *testing.T) {
 		}
 
 		// Encode multiples values in a single RLWE
-		ptLWE := rlwe.NewPlaintext(paramsLWE, paramsLWE.MaxLevel())
+		ptLWE := rlwe.NewPlaintext(paramsLWE, paramsLWE.MaxLevel(), -1)
 
 		for i := range values {
 			if values[i] < 0 {
-				ptLWE.Value.Coeffs[0][i] = paramsLWE.Q()[0] - uint64(-values[i]*scaleLWE)
+				ptLWE.Q.At(0)[i] = paramsLWE.Q()[0] - uint64(-values[i]*scaleLWE)
 			} else {
-				ptLWE.Value.Coeffs[0][i] = uint64(values[i] * scaleLWE)
+				ptLWE.Q.At(0)[i] = uint64(values[i] * scaleLWE)
 			}
 		}
 
 		if ptLWE.IsNTT {
-			paramsLWE.RingQ().NTT(ptLWE.Value, ptLWE.Value)
+			paramsLWE.RingQ().NTT(ptLWE.Q, ptLWE.Q)
 		}
 
 		// Encrypt the multiples values in a single RLWE
-		ctLWE := rlwe.NewCiphertext(paramsLWE, 1, paramsLWE.MaxLevel())
+		ctLWE := rlwe.NewCiphertext(paramsLWE, 1, paramsLWE.MaxLevel(), -1)
 		encryptorLWE.Encrypt(ptLWE, ctLWE)
 
 		// Evaluator for the Blind Rotation evaluation
@@ -141,16 +142,16 @@ func testBlindRotation(t *testing.T) {
 		q := paramsBR.Q()[0]
 		qHalf := q >> 1
 		decryptorBR := rlwe.NewDecryptor(paramsBR, skBR)
-		ptBR := rlwe.NewPlaintext(paramsBR, paramsBR.MaxLevel())
+		ptBR := rlwe.NewPlaintext(paramsBR, paramsBR.MaxLevel(), -1)
 		for i := 0; i < slots; i++ {
 
 			decryptorBR.Decrypt(ctsBR[i], ptBR)
 
 			if ptBR.IsNTT {
-				paramsBR.RingQ().INTT(ptBR.Value, ptBR.Value)
+				paramsBR.RingQ().INTT(ptBR.Q, ptBR.Q)
 			}
 
-			c := ptBR.Value.Coeffs[0][0]
+			c := ptBR.Q.At(0)[0]
 
 			var a float64
 			if c >= qHalf {
@@ -160,8 +161,7 @@ func testBlindRotation(t *testing.T) {
 			}
 
 			if values[i] != 0 {
-				fmt.Printf("%7.4f - %7.4f - %7.4f\n", math.Round(a*32)/32, math.Round(a*8)/8, values[i])
-				//require.Equal(t, sign(values[i]), math.Round(a*8)/8)
+				require.InDelta(t, math.Abs(a-sign(values[i])), 0, 1e-1)
 			}
 		}
 	})

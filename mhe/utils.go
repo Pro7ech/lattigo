@@ -3,7 +3,7 @@ package mhe
 import (
 	"math"
 
-	"github.com/tuneinsight/lattigo/v5/core/rlwe"
+	"github.com/Pro7ech/lattigo/rlwe"
 )
 
 // NoiseRelinearizationKey returns the standard deviation of the noise of each individual elements in the collective RelinearizationKey.
@@ -25,9 +25,33 @@ func NoiseRelinearizationKey(params rlwe.Parameters, nbParties int) (std float64
 	return math.Sqrt(2 * e * (H + 1))
 }
 
+func NoiseCircularCiphertext(params rlwe.Parameters, hasP bool, d, Log2Basis, nbParties int) (std float64) {
+
+	B := math.Exp2(float64(Log2Basis))
+	n := float64(nbParties)
+	N := float64(params.N())
+	Xs := float64(params.XsHammingWeight()+1) / N
+	Xe := params.NoiseFreshSK() * params.NoiseFreshSK()
+
+	var noiseKS float64
+	if hasP {
+		noiseKS = 1 / (n * 12.0)
+	} else {
+		noiseKS = float64(d) * B * B / (n * 12)
+	}
+
+	return math.Sqrt(N * n * n * Xe * (2*Xs + noiseKS))
+}
+
+// NoiseGadgetCiphertext returns the standard deviation of the noise of each individual elements in a gadget ciphertext
+// encrypted with the collective key.
+func NoiseGadgetCiphertext(params rlwe.Parameters, nbParties int) (std float64) {
+	return math.Sqrt(float64(nbParties)) * params.NoiseFreshSK()
+}
+
 // NoiseEvaluationKey returns the standard deviation of the noise of each individual elements in a collective EvaluationKey.
 func NoiseEvaluationKey(params rlwe.Parameters, nbParties int) (std float64) {
-	return math.Sqrt(float64(nbParties)) * params.NoiseFreshSK()
+	return NoiseGadgetCiphertext(params, nbParties)
 }
 
 // NoiseGaloisKey returns the standard deviation of the noise of each individual elements in a collective GaloisKey.
@@ -35,20 +59,8 @@ func NoiseGaloisKey(params rlwe.Parameters, nbParties int) (std float64) {
 	return NoiseEvaluationKey(params, nbParties)
 }
 
-// NoiseKeySwitch returns the standard deviation of the noise of a ciphertext after the KeySwitch protocol
-func NoiseKeySwitch(params rlwe.Parameters, nbParties int, noisect, noiseflood float64) (std float64) {
-	// #Parties * (noiseflood + noiseFreshSK) + noise ct
-	return noiseDecryptWithSmudging(nbParties, noisect, params.NoiseFreshSK(), noiseflood)
-}
-
-func NoisePublicKeySwitch(params rlwe.Parameters, nbParties int, noisect, noiseflood float64) (std float64) {
-	// #Parties * (var(freshZeroPK) + var(noiseFlood)) + noise ct
-	return noiseDecryptWithSmudging(nbParties, noisect, params.NoiseFreshPK(), noiseflood)
-}
-
-func noiseDecryptWithSmudging(nbParties int, noisect, noisefresh, noiseflood float64) (std float64) {
-	std = noisefresh
-	std *= std
+func NoiseKeySwitch(nbParties int, noisect, noisefresh, noiseflood float64) (std float64) {
+	std = noisefresh * noisefresh
 	std += noiseflood * noiseflood
 	std *= float64(nbParties)
 	std += noisect * noisect
